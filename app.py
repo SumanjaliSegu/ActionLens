@@ -28,7 +28,7 @@ from robotrace.video_processor import (ALLOWED_EXTENSIONS, VideoError, make_brow
 st.set_page_config(page_title="RoboTrace — robotics annotation QC", page_icon="🎯", layout="wide",
                    initial_sidebar_state="expanded")
 SETTINGS = get_settings()
-PAGES = ["Overview", "Benchmark", "Analyze", "Review", "Dashboard", "Export"]
+PAGES = ["Overview", "Analyze", "Review", "Dashboard", "Export"]
 
 CSS = """
 <style>
@@ -245,26 +245,10 @@ def page_overview() -> None:
   segment is checked against the video's own motion signal, and suspicious ones are queued for human review.</p>
 </div>""", unsafe_allow_html=True)
     st.write("")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.button("⬆ Upload a robot video", type="primary", use_container_width=True, on_click=goto, args=("Analyze",))
-    c2.button("▶ Explore benchmark results", use_container_width=True, on_click=goto, args=("Benchmark",),
-              help="8 real robot clips (UR5 + SO-101) with cached Muse Spark annotations and measured results.")
-    c3.button("▶ Try the sample (synthetic)", use_container_width=True, on_click=load_sample,
+    c2.button("▶ Try the sample (synthetic)", use_container_width=True, on_click=load_sample,
               help="Synthetic clip with precomputed, simulated annotations (for the QC demo).")
-    from robotrace import demo_data
-    summ = demo_data.results_summary()
-    if summ:
-        m1, m2, m3, m4 = st.columns(4)
-        metric(m1, summ["clips"], "development clips (UR5 + SO-101)")
-        metric(m2, f"{summ['per_dataset']['ur5']['five_ordered_steps']}/{summ['per_dataset']['ur5']['clips']}",
-               "UR5 clips with 5 ordered steps")
-        metric(m3, f"{summ['per_dataset']['so101']['missing_or_merged']}/{summ['per_dataset']['so101']['clips']}",
-               "SO-101 clips with a missing/merged step")
-        if summ.get("exp2"):
-            metric(m4, f"{summ['exp2']['idle_before_s']:.1f}s → {summ['exp2']['idle_after_s']:.1f}s",
-                   "idle inside actions (offline trim)")
-        st.caption("Development benchmark (8 clips) and one offline experiment — not a held-out test or an overall "
-                   "accuracy figure. Details on the Benchmark page.")
     show_flash()
 
     st.markdown("#### How it works")
@@ -276,8 +260,7 @@ def page_overview() -> None:
   <div><i>4</i><b>Review & export</b><span>A reviewer confirms or corrects each action, then exports JSON / CSV for training.</span></div>
 </div>""", unsafe_allow_html=True)
     st.write("")
-    st.caption("Flags are prompts for a human reviewer, not verdicts. The synthetic sample uses simulated annotations; "
-               "the benchmark clips use cached output of a recorded model run.")
+    st.caption("Flags are prompts for a human reviewer, not verdicts. The synthetic sample uses simulated annotations.")
 
 
 # ------------------------------------------------------------------------------------------ analyze
@@ -294,103 +277,6 @@ def save_upload(uploaded) -> Path:
         f.write(uploaded.getbuffer())
     S()["upload_path"] = str(dest)
     return dest
-
-
-def load_cached(key: str) -> None:
-    from robotrace import demo_data
-    try:
-        sess, clip = demo_data.load_cached_session(key, SETTINGS)
-    except Exception as e:  # noqa: BLE001 - show the real error, never a fake result
-        flash(f"Could not load cached clip {key}: {type(e).__name__}: {e}", "error")
-        return
-    S()["review"], S()["player_path"] = sess, str(clip)
-    S()["sel"] = sess.annotations[0].id if sess.annotations else None
-    S()["reference"] = None
-    flash(f"Loaded {key}: cached Muse Spark output from the recorded baseline run (no model call). "
-          "Click a segment to seek the video.")
-    goto("Review")
-
-
-def page_benchmark() -> None:
-    from robotrace import demo_data
-    st.markdown("## Benchmark: real robot clips")
-    show_flash()
-    st.markdown('<div class="rt-note"><b>Development benchmark, not a held-out test.</b> 8 clips from public datasets '
-                '(Berkeley UR5, CC-BY-4.0; LeRobot SO-101, Apache-2.0). Annotations below are the <b>cached output of '
-                'one recorded Muse Spark run</b>. Opening a clip replays that result instantly; no model is called.</div>',
-                unsafe_allow_html=True)
-    clips = demo_data.cached_clips()
-    if not clips:
-        st.warning("Cached benchmark files were not found in out/bench_annotation_20261010-213141/. The benchmark "
-                   "demo is unavailable on this machine; upload a video on the Analyze page instead.")
-        return
-    st.markdown("#### Open a clip in the annotation workspace")
-    for row in (clips[:4], clips[4:]):
-        cols = st.columns(4)
-        for col, c in zip(cols, row):
-            with col.container(border=True):
-                st.markdown(f"**{c['dataset'].upper()} · ep {c['episode']}**  \n"
-                            f"<span style='font-size:.85rem;color:#475569'>{esc(c['task'])}</span>",
-                            unsafe_allow_html=True)
-                st.caption(f"{c['n_segments']} cached segments · {c['split']}")
-                st.button("Open", key=f"open_{c['key']}", use_container_width=True, on_click=load_cached,
-                          args=(c["key"],))
-
-    summ = demo_data.results_summary()
-    if not summ:
-        st.info("Benchmark result files not found; results are not shown.")
-        return
-    st.markdown("#### Measured results (development set)")
-    u, s = summ["per_dataset"]["ur5"], summ["per_dataset"]["so101"]
-    m1, m2, m3, m4 = st.columns(4)
-    metric(m1, f"{u['five_ordered_steps']}/{u['clips']}", "UR5 clips: all 5 steps, in order")
-    metric(m2, f"{s['missing_or_merged']}/{s['clips']}", "SO-101 clips: a step missing or merged")
-    e2 = summ.get("exp2")
-    if e2:
-        metric(m3, f"{e2['idle_before_s']:.1f}s → {e2['idle_after_s']:.1f}s", "idle time inside action spans")
-        metric(m4, f"{e2['wrong_cuts_s']:.1f}s", "cuts into main robot motion")
-    detail = "; ".join(f"{k}: no separate {', '.join(v)}" for k, v in s["missing_detail"].items())
-    how = st.expander("How these numbers were measured", expanded=False)
-    how.caption(f"Step completeness = predicted phase sequence equals approach → grasp → transport → release → return "
-               f"(SO-101 {detail}). Baseline cost: {summ['requests']} calls, {summ['tokens_in']:,} input / "
-               f"{summ['tokens_out']:,} output tokens, {summ['latency_s']} s total model time ({esc(summ['model'])}).")
-    if e2:
-        how.caption(f"Idle-time result = offline experiment: video-motion-based trimming of idle time at the "
-                   f"start/end of the cached predictions (no model calls), summed over the 8 clips. It removed "
-                   f"{e2['settling_removed_s']:.1f}s of ambiguous end-settling motion (reported separately, uncertain). "
-                   f"Not yet part of the production pipeline.")
-
-    st.markdown("#### Temporal error and accuracy")
-    rows = []
-    if e2:
-        for ds, lab in (("ur5", "UR5"), ("so101", "SO-101")):
-            a = e2["per_dataset"][ds]
-            rows.append({"metric": f"{lab} — motion-start error (mean)", "baseline": f"{a['start_err_mean'][0]:.2f} s",
-                         "after offline trim (B)": f"{a['start_err_mean'][1]:.2f} s"})
-            rows.append({"metric": f"{lab} — motion-end error vs main motion (mean)",
-                         "baseline": f"{a['end_err_main_mean'][0]:.2f} s",
-                         "after offline trim (B)": f"{a['end_err_main_mean'][1]:.2f} s"})
-    rows += [{"metric": "Action-label accuracy", "baseline": "Not evaluated yet", "after offline trim (B)": "—"},
-             {"metric": "Object identification accuracy", "baseline": "Not evaluated yet", "after offline trim (B)": "—"},
-             {"metric": "Grasp / release boundary error", "baseline": "Not evaluated yet (reference set pending)",
-              "after offline trim (B)": "—"},
-             {"metric": "Held-out generalisation", "baseline": "Not evaluated yet", "after offline trim (B)": "—"}]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption("Errors are measured against motion start/end times checked visually in the video frames (UR5 5 fps, "
-               "±0.2 s; SO-101 30 fps), on the same 8 development clips.")
-
-    with st.expander("Methodology and limitations", expanded=False):
-        st.markdown(
-            "- **Pipeline:** ~1 frame/s sampled from the video → Muse Spark (OpenCode Go) returns actions with first/last "
-            "frame, objects, visual evidence → timestamps = frame times ± half the frame spacing → deterministic QC "
-            "(timestamp rules + video motion signals) → human review → JSON/CSV export.\n"
-            "- **References:** robot gripper/arm signals plus visual frame-by-frame checks; only 7 review rows are "
-            "human-confirmed so far. No overall accuracy percentage is claimed.\n"
-            "- **Known errors:** the model starts *grasp* 1.7–2.7 s early on UR5 (it labels arrival as grasp); "
-            "placement and release are sometimes merged; timing is limited to about ±0.5 s by ~1 fps sampling.\n"
-            "- **Scope:** 8 development clips, 2 robots, 4 tasks, one run per clip (run-to-run variance not measured). "
-            "The offline trimming result is a development experiment and still needs held-out confirmation.\n"
-            "- **Data use:** Muse Spark contributor models may use submitted frames for training.")
 
 
 def page_analyze() -> None:
@@ -946,7 +832,7 @@ def page_export() -> None:
 def main() -> None:
     init_state()
     sidebar()
-    {"Overview": page_overview, "Benchmark": page_benchmark, "Analyze": page_analyze, "Review": page_review,
+    {"Overview": page_overview, "Analyze": page_analyze, "Review": page_review,
      "Dashboard": page_dashboard, "Export": page_export}[S()["page"]]()
 
 
