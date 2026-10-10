@@ -5,3 +5,4 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 data/sample/_raw.mp4
+out/

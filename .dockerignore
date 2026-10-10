@@ -3,3 +3,6 @@ __pycache__
 .pytest_cache
 .env
 .git
+out
+.streamlit/secrets.toml
+*.pyc

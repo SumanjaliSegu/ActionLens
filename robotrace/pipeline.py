@@ -72,7 +72,10 @@ def process_video(path: Path, meta: VideoMetadata, adapter_name: str, *, model_c
                                 is_live_inference=result.is_live_inference,
                                 is_precomputed_sample=result.is_precomputed_sample,
                                 annotation_seconds=round(ann_seconds, 3), qc_seconds=round(qc_seconds, 3),
-                                sampled_frames=n_frames, warnings=warnings)
+                                sampled_frames=n_frames, warnings=warnings,
+                                model_summary=result.model_summary, provider=result.provider,
+                                model=result.model, prompt_version=result.prompt_version,
+                                sampling=result.sampling)
     baseline = [a.model_copy(deep=True) for a in result.annotations]
     session = ReviewSession(video=meta, processing=processing, baseline=baseline,
                             annotations=[a.model_copy(deep=True) for a in result.annotations],

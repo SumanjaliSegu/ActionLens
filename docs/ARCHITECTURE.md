@@ -6,7 +6,7 @@ flowchart LR
   VP --> AE{annotation_engine<br/>adapter interface}
   AE -->|sample| S[precomputed simulated<br/>sample only, SHA-256 checked]
   AE -->|motion| M[OpenCV motion segmentation<br/>CPU, unlabeled]
-  AE -->|claude| C[Claude vision API<br/>timestamped frames]
+  AE -->|muse / gemini / claude| C[vision APIs<br/>timestamped frames<br/>legacy or windowed sampling]
   AE -->|remote| R[Colab/Kaggle GPU<br/>Qwen2-VL via HTTP]
   AE --> EV[evidence frames<br/>start · middle · end]
   EV --> QC[quality_engine]
@@ -24,7 +24,8 @@ flowchart LR
 |---|---|---|
 | `robotrace/schemas.py` | Pydantic data model: `Annotation`, `Flag`, `ReviewSession`, … | no |
 | `robotrace/video_processor.py` | validation, probing, hashing, frame extraction, motion/cut signals, H.264 transcode | no |
-| `robotrace/annotation_engine.py` | `AnnotationAdapter` protocol + 4 adapters, evidence attachment | adapter-dependent |
+| `robotrace/annotation_engine.py` | `AnnotationAdapter` protocol + 6 adapters (`sample`, `motion`, `claude`, `gemini`, `muse`, `remote`), timestamp grounding, evidence attachment | adapter-dependent |
+| `robotrace/sampling.py` | legacy / windowed frame-sampling plans, cross-window merging | no |
 | `robotrace/quality_engine.py` | three QC layers, resolution carry-over, priority ranking | layer 3 only |
 | `robotrace/review_service.py` | every reviewer mutation, validated and logged; summary metrics | no |
 | `robotrace/export_service.py` | versioned exports | no |

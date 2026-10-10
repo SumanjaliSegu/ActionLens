@@ -1,5 +1,9 @@
+import os
 import sys
 from pathlib import Path
+
+# Keep tests hermetic: never load the developer's real .env (API keys) into the test process.
+os.environ["ROBOTRACE_SKIP_DOTENV"] = "1"
 
 import cv2
 import numpy as np

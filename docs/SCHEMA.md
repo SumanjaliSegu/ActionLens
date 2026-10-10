@@ -12,7 +12,7 @@ All exports are UTF-8. **All timestamps are seconds (float) from the start of th
 | `exported_at` | ISO-8601 UTC | |
 | `time_unit` | str | always `"seconds"` |
 | `video` | object | `filename`, `sha256`, `duration_s`, `fps`, `frame_count`, `width`, `height`, `size_bytes`, `is_synthetic_sample` |
-| `processing` | object | `adapter`, `adapter_detail`, `is_live_inference`, `is_precomputed_sample`, `annotation_seconds`, `qc_seconds`, `sampled_frames`, `warnings[]` |
+| `processing` | object | `adapter`, `adapter_detail`, `is_live_inference`, `is_precomputed_sample`, `annotation_seconds`, `qc_seconds`, `sampled_frames`, `warnings[]`, `model_summary`, `provider`, `model`, `prompt_version`, `sampling` (config, mode, spacing, requests, windows, merged_at_seams, rejected_actions) |
 
 ## Annotation object
 
@@ -27,6 +27,10 @@ All exports are UTF-8. **All timestamps are seconds (float) from the start of th
 | `source` | str | adapter name; `+edited` suffix after reviewer edits; `human` for reviewer-added |
 | `review_status` | str | `unreviewed`, `correct`, `incorrect`, `needs_review` (reviewed exports only) |
 | `reviewer_note` | str | free text |
+| `objects` | list[str] | objects involved: initially the vision model's names (`muse` / `gemini`), correctable by the reviewer (edits are logged; `baseline_annotations` keep the model's original) |
+| `visual_evidence` | str | what the model said it saw in the frames; the model's original claim, not updated by edits |
+| `cited_frame_times` | list[float] | sampled-frame timestamps the model cited; times that match no sent frame are discarded |
+| `boundary_precision_s` | float \| null | `start`/`end` are approximate to ± this many seconds; null = not stated |
 
 ## Flag object (review package)
 
@@ -57,6 +61,7 @@ All exports are UTF-8. **All timestamps are seconds (float) from the start of th
 | `TXT_EMPTY` | rule | medium | empty description |
 | `EV_LOW_MOTION` | signal | medium / low | < 20 % of the segment shows clear motion; low if subtle motion is present |
 | `EV_IDLE_INSIDE` | signal | medium | ≥ 1 s motionless stretch covering ≥ 25 % of an otherwise active segment |
+| `BD_START_IN_IDLE` | signal | medium | vision-model segment (has `boundary_precision_s`) starting before the video's first detected motion begins with a motionless stretch longer than 0.5 s and than its `boundary_precision_s`; details include `suggested_start_s` (flag only, never auto-trimmed) |
 | `BD_START_MAY_BE_LATE` | signal | medium | motion in the 0.6 s before start, uncovered by other annotations |
 | `BD_END_MAY_BE_EARLY` | signal | medium | motion in the 0.6 s after end, uncovered by other annotations |
 | `BD_ABRUPT_CHANGE` | signal | low | luminance-histogram change spike not within 0.4 s of a boundary |
@@ -76,7 +81,7 @@ re-check), and `summary`.
 ## CSV
 
 Columns: `id, start_s, end_s, duration_s, action, source, confidence, confidence_kind, review_status,
-reviewer_note, open_flags, flag_codes, evidence_times_s`. Text that begins with `= + - @` is prefixed with `'`
+reviewer_note, open_flags, flag_codes, evidence_times_s, boundary_precision_s, objects, visual_evidence, cited_frame_times_s`. Text that begins with `= + - @` is prefixed with `'`
 to prevent spreadsheet formula injection.
 
 ## Reference annotations (for evaluation upload)

@@ -34,7 +34,7 @@ each with the reason it was flagged. Review decisions are recorded and exported.
 | Landing page, pipeline diagram, honest-notes panel | ✅ |
 | Upload (mp4/mov/avi/mkv/webm/m4v), size & duration limits, corrupt-file handling, H.264 transcode for playback, temp cleanup | ✅ |
 | Bundled **synthetic** sample + precomputed **simulated** annotations (clearly labelled) | ✅ |
-| Annotation adapters: `sample`, `motion` (CPU), `claude` (vision API), `remote` (GPU notebook) | ✅ (`claude`/`remote` need credentials; see below) |
+| Annotation adapters: `sample`, `motion` (CPU), `muse` / `gemini` / `claude` (vision APIs), `remote` (GPU notebook) | ✅ code paths tested offline with mocked APIs; live runs need credentials (see below) |
 | QC layer 1 — deterministic timestamp rules | ✅ |
 | QC layer 2 — pixel-signal evidence (motion energy, luminance cuts), boundary checks, missing-action candidates | ✅ |
 | QC layer 3 — model verifier (Claude vision judges start/mid/end frames) | ✅ needs `ANTHROPIC_API_KEY` |
@@ -67,9 +67,11 @@ Click **Try the sample**. No GPU, API key, or download is needed. To regenerate 
 | `sample` | **No**: precomputed | nothing | Simulated annotator output for the bundled sample **only** (SHA-256 checked; refused for any other video) |
 | `motion` | yes | nothing (CPU) | Timing of motion bursts, labelled `activity segment N (unlabeled motion)` |
 | `claude` | yes | `ANTHROPIC_API_KEY` | Labelled segments from ≤ 24 timestamped frames (~1 fps) |
+| `muse` (primary) | yes | `OPENCODE_GO_API_KEY` | Muse Spark via OpenCode Go (`/responses`). Same frame sampling and observation fields as `gemini`. Contributor models may use the frames you send to train Meta models (not zero-data-retention) |
+| `gemini` | yes | `GEMINI_API_KEY` | Same frame sampling; also returns objects, visual evidence, cited frames and a scene summary. Boundaries are marked approximate (± half the frame spacing) |
 | `remote` | yes | `ROBOTRACE_REMOTE_URL` (+ token) | Labelled segments from the GPU notebook (Qwen2-VL-2B by default) |
 
-The `claude` and `remote` engines are **frame-based approximations**: they see stills, so boundaries are quantised
+The `muse`, `gemini`, `claude` and `remote` engines are **frame-based approximations**: they see stills, so boundaries are quantised
 to the sampling interval and very short actions can be missed. Confidence values are model self-reports and
 are labelled as uncalibrated. If an engine is unavailable, the UI says why and the others keep working.
 Uploaded videos never receive canned annotations.
@@ -151,18 +153,34 @@ Free CPU Spaces sleep after inactivity, and the first load after sleep takes abo
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Enables the `claude` engine and the model verifier (secret) |
 | `ROBOTRACE_CLAUDE_MODEL` | `claude-opus-5-5` | Claude model id |
+| `OPENCODE_GO_API_KEY` | — | Enables the `muse` engine (secret; sent only as `Authorization: Bearer`) |
+| `ROBOTRACE_MUSE_MODEL` | `muse-spark-1.3-contributor` | OpenCode Go model id |
+| `ROBOTRACE_OPENCODE_GO_URL` | `https://opencode.ai/zen/go/v1` | OpenCode Go base URL |
+| `ROBOTRACE_OPENCODE_TIMEOUT_S` | `180` | OpenCode Go request timeout |
+| `ROBOTRACE_SAMPLING` | `legacy` | Frame sampling for `muse` / `gemini`: `legacy` = one request, ~1 frame/s, ≤ `ROBOTRACE_MAX_FRAMES` frames (spacing grows with video length); `windowed` = fixed spacing over overlapping windows, one request per window (more requests and tokens; see `robotrace/sampling.py`) |
+| `ROBOTRACE_FRAME_SPACING_S` | `0.5` | Target frame spacing in `windowed` mode |
+| `ROBOTRACE_WINDOW_OVERLAP_S` | `1.0` | Overlap between consecutive windows |
+| `ROBOTRACE_MAX_WINDOWS` | `4` | Request cap per video in `windowed` mode; beyond it the spacing is widened (with a warning) |
+| `GEMINI_API_KEY` | — | Enables the `gemini` engine (secret; sent only in the `x-goog-api-key` header) |
+| `ROBOTRACE_GEMINI_MODEL` | `gemini-3.8-flash` | Gemini model id |
+| `ROBOTRACE_GEMINI_TIMEOUT_S` | `180` | Gemini request timeout |
 | `ROBOTRACE_REMOTE_URL` | — | Base URL of the GPU notebook service |
 | `ROBOTRACE_REMOTE_TOKEN` | — | Bearer token for that service (secret) |
 | `ROBOTRACE_REMOTE_TIMEOUT_S` | 300 | Remote request timeout |
 | `ROBOTRACE_MAX_UPLOAD_MB` | 200 | Upload size limit (keep `.streamlit/config.toml` `maxUploadSize` ≥ this) |
 | `ROBOTRACE_MAX_DURATION_S` | 180 | Video duration limit |
-| `ROBOTRACE_MAX_FRAMES` | 24 | Frames per Claude annotation request (cost/latency bound) |
+| `ROBOTRACE_MAX_FRAMES` | 24 | Frames per vision-model request (`muse`, `gemini`, `claude`; cost/latency bound) |
 | `ROBOTRACE_WORK_DIR` | `<tmp>/robotrace` | Uploads and frame cache. Uploads older than 6 h are deleted |
 
-See `.env.example`. Never commit real keys. `.env` and `.streamlit/secrets.toml` are git-ignored.
+See `.env.example`. Never commit real keys. `.env` and `.streamlit/secrets.toml` are git-ignored (and excluded
+from Docker builds). A `.env` file in the project root is loaded automatically at startup; variables already set
+in the shell or host secrets take precedence, and `ROBOTRACE_SKIP_DOTENV=1` disables loading (the tests do this).
+`ANTHROPIC_AUTH_TOKEN` is accepted as an alternative to `ANTHROPIC_API_KEY`.
 
-**Cost note:** the `claude` engine and verifier are paid API calls (≈ 24–35 images per request). The sample,
-`motion`, QC, review and export features are free.
+**Cost note:** the `muse`, `gemini` and `claude` engines and the verifier are paid API calls (up to
+`ROBOTRACE_MAX_FRAMES` images per request; `ROBOTRACE_SAMPLING=windowed` makes up to `ROBOTRACE_MAX_WINDOWS`
+requests per video, and the Analyze page shows the planned count before you run). The sample, `motion`, QC,
+review and export features are free.
 
 ## Security & reliability
 
@@ -173,7 +191,10 @@ See `.env.example`. Never commit real keys. `.env` and `.streamlit/secrets.toml`
 - Model and remote output are schema-validated (Pydantic). Invented ids are ignored, and failures become readable
   errors, never canned data.
 - Reference uploads are parsed as JSON only, with no pickle or other unsafe deserialisation.
-- Reviewer and model text is HTML-escaped before rendering.
+- Reviewer and model text is escaped before rendering (HTML and Markdown syntax, so model output cannot inject
+  links or images that make the browser fetch external URLs).
+- Frame-based model output is accepted only if its timestamps match frames that were actually sent; failures in
+  any request fail the whole run (no partial results, no automatic retries).
 
 ## Tests
 
@@ -189,6 +210,13 @@ See `.env.example`. Never commit real keys. `.env` and `.streamlit/secrets.toml`
 - the motion adapter
 - adapter unavailability, and an unreachable remote endpoint
 - an end-to-end run on the sample
+- Muse / Gemini / Claude adapters with **mocked** HTTP (request format, parsing, every error path, no fallback);
+  these do not measure real model accuracy
+- frame-sampling plans, cross-window merging and timestamp grounding (`robotrace/sampling.py`)
+- the review → export workflow through the real Streamlit form, and escaping of untrusted model text
+- the SO101 evaluator (reference rules, phase mapping, scoring, cache identity, never overwriting results)
+
+On Windows without an activated venv: `.venv\Scripts\python.exe -m pytest -q`.
 
 ## Troubleshooting
 
@@ -208,9 +236,11 @@ See `.env.example`. Never commit real keys. `.env` and `.streamlit/secrets.toml`
   actions can be missed. Future work: native video-LLMs with timestamp grounding, and per-boundary dense re-sampling.
 - **Motion signals are global.** Fine manipulation (gripper only) produces weak signals, and camera motion inflates
   them. Future work: optical flow restricted to robot/object masks, and ego-motion compensation.
-- **No boundary refinement.** RoboTrace flags suspicious boundaries but does not propose corrected timestamps.
-- **No real-data benchmark yet.** The evaluation tooling exists, but it has only been run on the synthetic sample.
-  Next: datasets with human action labels (e.g. subsets of Open X-Embodiment / DROID with their licences checked).
+- **No automatic boundary refinement.** RoboTrace flags suspicious boundaries but never changes timestamps; only
+  `BD_START_IN_IDLE` suggests a later start (`suggested_start_s`) for a reviewer to accept or reject.
+- **No human-labelled real-data benchmark yet.** Besides the synthetic sample, `scripts/eval_so101.py` scores Muse
+  on 10 `lerobot/svla_so101_pickplace` episodes against phases *derived by rules from recorded robot signals*
+  (not human labels). Next: datasets with human action labels, licences checked.
 - **Single-user, in-memory state.** There is no database or multi-reviewer agreement. The review package is the
   persistence mechanism.
 - Model verifier verdicts are opinions. Measure their precision on a reference set before trusting them.
@@ -223,6 +253,11 @@ robotrace/                 schemas, video_processor, annotation_engine, quality_
                            review_service, export_service, evaluation, pipeline, charts, storage, config
 data/sample/               synthetic sample video, ground truth, simulated baseline annotations
 scripts/make_sample.py     regenerates the sample
+scripts/run_inference.py   one video through the full pipeline from the command line (writes a review package)
+scripts/eval_so101.py      SO101 evaluation (dry run by default; --live makes paid Muse calls, at most one per
+                           episode, cached under out/eval_so101/ and never overwritten)
+robotrace/sampling.py      legacy / windowed frame-sampling plans and cross-window merging
+out/                       generated outputs and evaluation caches (git-ignored)
 remote_inference/server.py FastAPI GPU service;  notebooks/robotrace_remote_gpu.ipynb launches it
 tests/                     pytest suite
 docs/                      architecture, schema, remote API, demo script

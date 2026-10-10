@@ -38,7 +38,8 @@ def annotations_json(session: ReviewSession) -> str:
 
 
 CSV_FIELDS = ["id", "start_s", "end_s", "duration_s", "action", "source", "confidence", "confidence_kind",
-              "review_status", "reviewer_note", "open_flags", "flag_codes", "evidence_times_s"]
+              "review_status", "reviewer_note", "open_flags", "flag_codes", "evidence_times_s",
+              "boundary_precision_s", "objects", "visual_evidence", "cited_frame_times_s"]
 
 
 def annotations_csv(session: ReviewSession) -> str:
@@ -54,7 +55,10 @@ def annotations_csv(session: ReviewSession) -> str:
                     "confidence_kind": a.confidence_kind, "review_status": getattr(st, "value", st),
                     "reviewer_note": _csv_safe(session.notes.get(a.id, "")), "open_flags": len(flags),
                     "flag_codes": ";".join(sorted({f.code for f in flags})),
-                    "evidence_times_s": ";".join(f"{e.t:.2f}" for e in a.evidence)})
+                    "evidence_times_s": ";".join(f"{e.t:.2f}" for e in a.evidence),
+                    "boundary_precision_s": "" if a.boundary_precision_s is None else a.boundary_precision_s,
+                    "objects": _csv_safe(";".join(a.objects)), "visual_evidence": _csv_safe(a.visual_evidence),
+                    "cited_frame_times_s": ";".join(f"{t:.2f}" for t in a.cited_frame_times)})
     return buf.getvalue()
 
 

@@ -43,8 +43,10 @@ def set_status(session: ReviewSession, ann_id: str, status: ReviewStatus | str, 
 
 
 def edit_annotation(session: ReviewSession, ann_id: str, *, start: Optional[float] = None,
-                    end: Optional[float] = None, action: Optional[str] = None) -> Annotation:
+                    end: Optional[float] = None, action: Optional[str] = None,
+                    objects: Optional[list[str]] = None) -> Annotation:
     a = session.get(ann_id)
+    new_objects = a.objects if objects is None else [o.strip()[:80] for o in objects if o.strip()]
     new_start = a.start if start is None else round(float(start), 3)
     new_end = a.end if end is None else round(float(end), 3)
     new_action = a.action if action is None else action.strip()
@@ -58,11 +60,14 @@ def edit_annotation(session: ReviewSession, ann_id: str, *, start: Optional[floa
         raise ReviewError("Action description cannot be empty.")
     if len(new_action) > 300:
         raise ReviewError("Action description is too long (max 300 characters).")
+    if len(new_objects) > 10:
+        raise ReviewError("At most 10 objects per annotation.")
     changes = {k: [old, new] for k, old, new in (("start", a.start, new_start), ("end", a.end, new_end),
-                                                ("action", a.action, new_action)) if old != new}
+                                                ("action", a.action, new_action),
+                                                ("objects", a.objects, new_objects)) if old != new}
     if not changes:
         return a
-    a.start, a.end, a.action = new_start, new_end, new_action
+    a.start, a.end, a.action, a.objects = new_start, new_end, new_action, new_objects
     if a.source != "human":
         a.source = f"{a.source}+edited" if not a.source.endswith("+edited") else a.source
     session.events.append(ReviewEvent(kind="edit", target_id=ann_id, payload=changes))

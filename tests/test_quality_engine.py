@@ -125,3 +125,52 @@ def test_resolutions_survive_recheck():
     again = carry_resolutions(run_qc(anns, 10.0), first)
     match = [f for f in again if f.key == first[0].key][0]
     assert match.resolved and match.resolution_note == "ok"
+
+
+# ---------------------------------------------------------------------- BD_START_IN_IDLE (initial idle)
+def test_segment_starting_in_initial_idle_is_flagged_not_trimmed():
+    sig = make_signal([(1.6, 4.0)])                      # robot still until ~1.6s
+    a = ann(0.0, 4.0, "grasp the brick", id="a1")
+    a.boundary_precision_s = 0.5                         # frame-sampled vision-model output
+    flags = signal_flags([a], sig, 10.0)
+    lead = [f for f in flags if f.code == "BD_START_IN_IDLE"]
+    assert len(lead) == 1 and 1.4 <= lead[0].details["suggested_start_s"] <= 1.8
+    assert (a.start, a.end) == (0.0, 4.0)                # never changed automatically
+    assert "EV_IDLE_INSIDE" not in codes(flags, "a1")    # same idle stretch is not reported twice
+
+
+def test_initial_idle_within_stated_precision_is_not_flagged():
+    sig = make_signal([(1.0, 4.0)])
+    a = ann(0.0, 4.0, "grasp the brick", id="a1")
+    a.boundary_precision_s = 1.5
+    assert "BD_START_IN_IDLE" not in codes(signal_flags([a], sig, 10.0))
+    short = ann(0.0, 4.0, "grasp the brick", id="a2")    # idle 0.4s < 0.5s minimum
+    short.boundary_precision_s = 0.3
+    assert "BD_START_IN_IDLE" not in codes(signal_flags([short], make_signal([(0.4, 4.0)]), 10.0))
+
+
+def test_mid_video_pause_is_not_an_initial_idle_flag():
+    sig = make_signal([(0.4, 2.0), (4.0, 8.0)])          # robot already moved before this segment
+    a = ann(2.2, 8.0, "place the brick", id="a1")
+    a.boundary_precision_s = 0.5
+    assert "BD_START_IN_IDLE" not in codes(signal_flags([a], sig, 10.0))
+
+
+def test_initial_idle_rule_only_applies_to_frame_sampled_model_output():
+    sig = make_signal([(1.6, 4.0)])                      # e.g. human / simulated annotation, no stated precision
+    assert "BD_START_IN_IDLE" not in codes(signal_flags([ann(0.0, 4.0, "reach", id="a1")], sig, 10.0))
+
+
+def test_accepting_suggested_start_clears_the_flag(meta):
+    from robotrace import review_service as rs
+    from robotrace.schemas import ProcessingInfo, ReviewSession
+    sig = make_signal([(1.6, 4.0)])
+    a = ann(0.0, 4.0, "grasp the brick", id="a1")
+    a.boundary_precision_s = 0.5
+    flags = run_qc([a], meta.duration_s, sig)
+    flag = next(f for f in flags if f.code == "BD_START_IN_IDLE")
+    sess = ReviewSession(video=meta, processing=ProcessingInfo(adapter="muse", is_live_inference=True),
+                         baseline=[a.model_copy(deep=True)], annotations=[a.model_copy(deep=True)],
+                         initial_flags=[f.model_copy(deep=True) for f in flags], flags=flags, signals=sig.to_dict())
+    rs.edit_annotation(sess, "a1", start=flag.details["suggested_start_s"])
+    assert "BD_START_IN_IDLE" not in codes(sess.flags, "a1")

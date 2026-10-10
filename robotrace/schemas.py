@@ -53,6 +53,12 @@ class Annotation(BaseModel):
     confidence: Optional[float] = None
     confidence_kind: Literal["none", "model_self_reported", "heuristic"] = "none"
     source: str = "unknown"  # adapter name, "human" for reviewer-added rows
+    # Vision-model observations (empty for engines that do not produce them). These describe the model's
+    # ORIGINAL claim and are not rewritten when a reviewer edits the annotation.
+    objects: list[str] = Field(default_factory=list)
+    visual_evidence: str = ""                       # what the model says it saw in the frames
+    cited_frame_times: list[float] = Field(default_factory=list)  # sampled frames the model cited (validated)
+    boundary_precision_s: Optional[float] = None    # start/end are approximate to +/- this; None = not stated
 
     @property
     def duration(self) -> float:
@@ -110,6 +116,7 @@ class ReviewEvent(BaseModel):
 
 
 class ProcessingInfo(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     adapter: str
     adapter_detail: str = ""
     is_live_inference: bool
@@ -119,16 +126,27 @@ class ProcessingInfo(BaseModel):
     qc_seconds: float = 0.0
     sampled_frames: int = 0
     warnings: list[str] = Field(default_factory=list)
+    model_summary: str = ""  # vision model's description of the whole scene, if the engine gives one
+    provider: str = ""       # API provider that served the model, e.g. "OpenCode Go" (vision engines)
+    model: str = ""          # model id requested from that provider
+    prompt_version: str = ""  # version of the vision prompt used (see annotation_engine), if any
+    sampling: dict = Field(default_factory=dict)  # frame-sampling config + plan actually used (vision engines)
 
 
 class AnnotationResult(BaseModel):
     """What an annotation adapter returns."""
+    model_config = ConfigDict(protected_namespaces=())
     annotations: list[Annotation]
     adapter: str
     adapter_detail: str = ""
     is_live_inference: bool
     is_precomputed_sample: bool = False
     warnings: list[str] = Field(default_factory=list)
+    model_summary: str = ""
+    provider: str = ""
+    model: str = ""
+    prompt_version: str = ""
+    sampling: dict = Field(default_factory=dict)
 
 
 class ReviewSession(BaseModel):

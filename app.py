@@ -15,7 +15,7 @@ import streamlit as st
 from robotrace import __version__
 from robotrace import export_service as ex
 from robotrace import review_service as rs
-from robotrace.annotation_engine import ADAPTERS, AdapterUnavailable, get_adapter
+from robotrace.annotation_engine import ADAPTERS, MUSE_DATA_NOTICE, AdapterUnavailable, get_adapter
 from robotrace.charts import SEVERITY_COLORS, STATUS_COLORS, flag_category_chart, timeline_chart
 from robotrace.config import SAMPLE_DIR, get_settings
 from robotrace.evaluation import Segment, evaluate_flags, evaluate_segments
@@ -105,18 +105,27 @@ def review() -> ReviewSession | None:
     return S().get("review")
 
 
+_ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "[": "&#91;", "]": "&#93;",
+        "(": "&#40;", ")": "&#41;", "!": "&#33;", "*": "&#42;", "_": "&#95;", "`": "&#96;", "~": "&#126;",
+        "\\": "&#92;", "#": "&#35;", "|": "&#124;", "$": "&#36;"}
+
+
 def esc(text: str) -> str:
-    """Escape untrusted text (model output, file names) before inserting into HTML."""
-    import html
-    return html.escape(str(text))
+    """Escape untrusted text (model output, file names) for st.markdown / st.caption / alerts, with or without
+    unsafe_allow_html: neutralises HTML and Markdown syntax (links, images, emphasis, math), so model output can
+    neither inject markup nor make the viewer's browser load external URLs. Do not use inside `code spans`."""
+    return "".join(_ESC.get(c, c) for c in str(text))
 
 
 def mode_badge(sess: ReviewSession) -> str:
     p = sess.processing
     if p.is_precomputed_sample:
         return '<span class="rt-badge rt-sample">PRECOMPUTED SAMPLE</span>'
+    if p.adapter == "motion":
+        return '<span class="rt-badge rt-low">MOTION SEGMENTATION · NO AI</span>'
     if p.is_live_inference:
-        return f'<span class="rt-badge rt-live">LIVE · {esc(p.adapter)}</span>'
+        who = f"{p.provider} · {p.model}" if p.provider and p.model else p.adapter
+        return f'<span class="rt-badge rt-live">LIVE AI · {esc(who)}</span>'
     return f'<span class="rt-badge rt-low">{esc(p.adapter)}</span>'
 
 
@@ -213,7 +222,7 @@ def page_overview() -> None:
 <div class="rt-flow">
   <div class="rt-step"><b>1 · Ingest</b><span>Validate format, size, duration; decode with OpenCV; hash for caching.</span></div>
   <div class="rt-arrow">→</div>
-  <div class="rt-step"><b>2 · Annotate</b><span>Swappable adapter: Claude vision, remote GPU video-LLM, or motion segmentation.</span></div>
+  <div class="rt-step"><b>2 · Annotate</b><span>Swappable adapter: Gemini or Claude vision, remote GPU video-LLM, or motion segmentation.</span></div>
   <div class="rt-arrow">→</div>
   <div class="rt-step core"><b>3 · Quality control</b><span>Timestamp rules · pixel-signal evidence · optional model verifier.</span></div>
   <div class="rt-arrow">→</div>
@@ -278,7 +287,7 @@ def page_analyze() -> None:
             f"≤ {SETTINGS.max_duration_s:.0f} s)", type=[e[1:] for e in ALLOWED_EXTENSIONS])
 
     st.markdown("#### Annotation engine")
-    options = ["claude", "remote", "motion"] + (["sample"] if source != "Upload my video" else [])
+    options = ["muse", "gemini", "claude", "remote", "motion"] +(["sample"] if source != "Upload my video" else [])
     avail = {n: get_adapter(n).availability() for n in options}
     default = next((i for i, n in enumerate(options) if avail[n][0]), len(options) - 1)
     if source != "Upload my video":
@@ -287,6 +296,13 @@ def page_analyze() -> None:
                       format_func=lambda n: f"{ADAPTERS[n].label}{'' if avail[n][0] else ' — unavailable'}")
     ok, why = avail[engine]
     (st.caption if ok else st.warning)(why)
+    if engine in ("muse", "gemini"):
+        from robotrace.sampling import describe_sampling, sampling_config
+        known = sample_metadata().duration_s if source != "Upload my video" else None
+        st.caption("Planned: " + describe_sampling(sampling_config(SETTINGS), known)
+                   + ("" if known else " (exact counts depend on the video's length)") + ".")
+    if engine == "muse" and "contributor" in SETTINGS.muse_model:
+        st.info(MUSE_DATA_NOTICE + " Only analyze videos you are allowed to share on those terms.")
     model_check_ok = SETTINGS.has_anthropic_key
     model_check = st.checkbox("Also run the model-based evidence verifier (Claude vision; one extra API call)",
                               value=False, disabled=not model_check_ok,
@@ -317,7 +333,9 @@ def page_analyze() -> None:
         return
     except AdapterUnavailable as e:
         progress.empty()
-        st.error(f"Annotation engine unavailable: {e}  \nTry another engine: motion segmentation always works.")
+        st.error(f"Annotation engine '{engine}' failed: {e}  \nNo annotations were generated and nothing was "
+                 "substituted. Fix the configuration and retry, or pick another engine (motion segmentation "
+                 "needs no API).")
         return
     except Exception as e:  # noqa: BLE001 - surface unexpected errors without a traceback dump
         progress.empty()
@@ -329,11 +347,36 @@ def page_analyze() -> None:
     S()["reference"] = load_sample_reference(meta.sha256) if meta.is_synthetic_sample else None
     n_open = sum(not f.resolved for f in sess.flags)
     flash(f"Processed {meta.filename}: {len(sess.annotations)} annotations, {n_open} flags.")
+    engine_report(sess)
     for w in sess.processing.warnings:
-        st.warning(w)
+        st.warning(esc(w))
     if not sess.annotations:
         st.warning("The engine returned no annotations. You can still add annotations manually in Review.")
     st.button("Open review →", type="primary", on_click=goto, args=("Review",))
+
+
+def engine_report(sess: ReviewSession) -> None:
+    """Which engine actually ran, and (for vision models) what it reported seeing."""
+    p = sess.processing
+    st.markdown(f"#### Engine that ran &nbsp; {mode_badge(sess)}", unsafe_allow_html=True)
+    if p.provider:
+        st.markdown(f"**Provider:** {esc(p.provider)} &nbsp;·&nbsp; **Model:** <span class='rt-mono'>"
+                    f"{esc(p.model)}</span>",
+                    unsafe_allow_html=True)
+    st.caption(f"{ADAPTERS[p.adapter].label if p.adapter in ADAPTERS else esc(p.adapter)} · {esc(p.adapter_detail)} · "
+               f"annotation took {p.annotation_seconds:.1f}s")
+    if p.model_summary:
+        st.markdown(f"**Model's scene description:** {esc(p.model_summary)}", unsafe_allow_html=True)
+    if any(a.visual_evidence or a.objects for a in sess.baseline):
+        st.markdown("**Model observations** (boundaries are approximate; confidence is self-reported)")
+        st.dataframe(pd.DataFrame([{
+            "start (s)": a.start, "end (s)": a.end, "± (s)": a.boundary_precision_s, "action": a.action,
+            "objects": ", ".join(a.objects), "visual evidence": a.visual_evidence,
+            "cited frames (s)": ", ".join(f"{t:.2f}" for t in a.cited_frame_times),
+            "self-rated confidence (uncalibrated)": a.confidence} for a in sess.baseline]),
+            hide_index=True, use_container_width=True)
+    st.caption(f"Deterministic QC ran on these annotations: {len(sess.flags)} flag(s). "
+               "Resolve them on the Review page.")
 
 
 # ------------------------------------------------------------------------------------------- review
@@ -359,6 +402,8 @@ def page_review() -> None:
         st.markdown('<div class="rt-note">These annotations are <b>precomputed and simulated</b> (deliberate errors '
                     'injected for demonstration). They were not produced by live inference.</div>',
                     unsafe_allow_html=True)
+    if sess.processing.model_summary:
+        st.caption(f"Model's scene description: {esc(sess.processing.model_summary)}")
     show_flash()
 
     left, right = st.columns([3, 2], gap="large")
@@ -427,7 +472,16 @@ def annotation_detail(sess: ReviewSession, a) -> None:
                  f"status: **{status.value}**"]
     if a.confidence is not None:
         meta_bits.append(f"model self-reported confidence {a.confidence:.2f} (uncalibrated)")
+    if a.boundary_precision_s is not None:
+        meta_bits.append(f"boundaries approximate ±{a.boundary_precision_s:.2f}s")
     st.markdown(" · ".join(meta_bits))
+    if a.objects or a.visual_evidence:
+        cited = ", ".join(f"{t:.2f}s" for t in a.cited_frame_times) or "none"
+        st.markdown(f"**Objects:** {esc(', '.join(a.objects) or '—')} &nbsp;·&nbsp; **Model's visual evidence** "
+                    f"(original model output): {esc(a.visual_evidence or '—')} · cited frames: {cited}",
+                    unsafe_allow_html=True)
+        st.caption("Object names, colours and boundaries come from a vision model and may be wrong. Check them "
+                   "against the evidence frames and correct them in the edit form.")
 
     c_ev, c_act = st.columns([3, 2], gap="large")
     with c_ev:
@@ -469,11 +523,15 @@ def annotation_detail(sess: ReviewSession, a) -> None:
             new_start = e1.number_input("Start (s)", value=float(a.start), step=0.1, format="%.2f")
             new_end = e2.number_input("End (s)", value=float(a.end), step=0.1, format="%.2f")
             new_action = st.text_input("Action description", value=a.action, max_chars=300)
+            new_objects = st.text_input("Objects (comma-separated)", value=", ".join(a.objects), max_chars=400,
+                                        help="Model-reported object names and colours can be wrong; "
+                                             "correct them here.")
             note = st.text_input("Reviewer note (optional)", value=sess.notes.get(a.id, ""), max_chars=300)
             mark = st.checkbox("Mark as correct after saving", value=True)
             if st.form_submit_button("Save changes", type="primary", use_container_width=True):
                 try:
-                    rs.edit_annotation(sess, a.id, start=new_start, end=new_end, action=new_action)
+                    rs.edit_annotation(sess, a.id, start=new_start, end=new_end, action=new_action,
+                                       objects=[o for o in new_objects.split(",")])
                     if note != sess.notes.get(a.id, ""):
                         sess.notes[a.id] = note
                     if mark:

@@ -30,6 +30,8 @@ class QCConfig:
     long_min_s: float = 4.0            # ... and longer than this many seconds
     low_activity_frac: float = 0.2     # < this fraction of active steps => weak visual support
     idle_run_s: float = 1.0            # an idle stretch this long inside a segment is suspicious
+    lead_idle_min_s: float = 0.5       # motionless start longer than this (and than the stated boundary
+                                       # precision) => the action probably starts later
     boundary_window_s: float = 0.6     # look-around window for boundary checks
     missing_active_frac: float = 0.5   # uncovered interval this active => missing-action candidate
     missing_min_s: float = 0.5
@@ -146,6 +148,7 @@ def signal_flags(annotations: list[Annotation], sig: SignalProfile, duration: fl
     thr = sig.active_threshold
     valid = [a for a in annotations if _valid(a, duration, cfg.tolerance_s)]
     covered = [_clamped(a, duration) for a in valid]
+    first_motion_t = float(sig.times[int(np.argmax(active))]) if active.any() else None
 
     def covered_by_other(t0: float, t1: float, me: Annotation) -> bool:
         return any(s <= t0 + cfg.tolerance_s and e >= t1 - cfg.tolerance_s
@@ -177,7 +180,27 @@ def signal_flags(annotations: list[Annotation], sig: SignalProfile, duration: fl
                               annotation_id=a.id, start=a.start, end=a.end, details=base,
                               reason=f"Only {frac:.0%} of this segment shows clear motion, yet it is described as "
                                      f"an action ('{a.action}')." + extra))
+        # Frame-sampled vision-model segment (it has a stated boundary precision) that begins during the video's
+        # initial idle period: start snapping to the first sampled frame / 0 s can absorb the robot's rest time.
+        # Mid-video pauses are not considered. Flag only; the boundary is never changed.
+        seg = active[m]
+        lead_s = (int(np.argmax(seg)) if seg.any() else len(seg)) * sig.step
+        lead_tol = max(cfg.lead_idle_min_s, a.boundary_precision_s or 0.0)
+        lead_flagged = (a.boundary_precision_s is not None and bool(seg.any()) and first_motion_t is not None
+                        and s < first_motion_t
+                        and lead_s > lead_tol and frac >= cfg.low_activity_frac)
+        if lead_flagged:
+            suggested = round(s + lead_s, 2)
+            flags.append(Flag(code="BD_START_IN_IDLE", category="boundary", severity=Severity.medium, origin=S,
+                              annotation_id=a.id, start=a.start, end=a.end,
+                              details={**base, "leading_idle_s": round(lead_s, 2), "suggested_start_s": suggested,
+                                       "boundary_precision_s": a.boundary_precision_s},
+                              reason=f"The first {lead_s:.1f}s of this segment show no motion, more than the stated "
+                                     f"boundary precision. The action may start later (around {suggested:.2f}s); "
+                                     "check the start. Nothing was changed automatically."))
         idle = _longest_run(~active[m], sig.step)
+        if lead_flagged and idle <= lead_s + 1e-9:
+            idle = 0.0  # the longest idle stretch is the leading one, already reported above
         if idle >= cfg.idle_run_s and idle >= 0.25 * (e - s) and frac >= cfg.low_activity_frac:
             flags.append(Flag(code="EV_IDLE_INSIDE", category="boundary", severity=Severity.medium, origin=S,
                               annotation_id=a.id, start=a.start, end=a.end, details={**base, "idle_run_s": idle},
