@@ -31,6 +31,7 @@ All exports are UTF-8. **All timestamps are seconds (float) from the start of th
 | `visual_evidence` | str | what the model said it saw in the frames; the model's original claim, not updated by edits |
 | `cited_frame_times` | list[float] | sampled-frame timestamps the model cited; times that match no sent frame are discarded |
 | `boundary_precision_s` | float \| null | `start`/`end` are approximate to ± this many seconds; null = not stated |
+| `actor` | str | who the model says performs this action: `robot`, `human`, `unclear` (ambiguous from the frames), or `""` (not reported — non-vision engines, or exports from before prompt_version `obs-v4`). Reviewer-correctable; never inferred beyond what the frames show. |
 
 ## Flag object (review package)
 
@@ -81,7 +82,7 @@ re-check), and `summary`.
 ## CSV
 
 Columns: `id, start_s, end_s, duration_s, action, source, confidence, confidence_kind, review_status,
-reviewer_note, open_flags, flag_codes, evidence_times_s, boundary_precision_s, objects, visual_evidence, cited_frame_times_s`. Text that begins with `= + - @` is prefixed with `'`
+reviewer_note, open_flags, flag_codes, evidence_times_s, boundary_precision_s, objects, visual_evidence, cited_frame_times_s, actor`. Text that begins with `= + - @` is prefixed with `'`
 to prevent spreadsheet formula injection.
 
 ## Reference annotations (for evaluation upload)

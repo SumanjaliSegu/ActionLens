@@ -59,6 +59,10 @@ class Annotation(BaseModel):
     visual_evidence: str = ""                       # what the model says it saw in the frames
     cited_frame_times: list[float] = Field(default_factory=list)  # sampled frames the model cited (validated)
     boundary_precision_s: Optional[float] = None    # start/end are approximate to +/- this; None = not stated
+    # Who the model says performed the action: "robot", "human", "unclear" (ambiguous evidence), or ""
+    # (not reported, e.g. non-vision engines). Never inferred beyond what the frames show; see
+    # annotation_engine._canonical_actor. Added in prompt_version obs-v4; "" on anything from before.
+    actor: str = ""
 
     @property
     def duration(self) -> float:

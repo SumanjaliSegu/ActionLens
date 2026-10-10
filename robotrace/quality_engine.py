@@ -272,13 +272,16 @@ _VERIFY_SCHEMA = {
     "required": ["verdicts"], "additionalProperties": False,
 }
 
-_VERIFY_PROMPT = """You are auditing action annotations of a robot manipulation video. For each annotation you
-get its id, claimed time interval, claimed action, and frames sampled at its start, middle and end.
+_VERIFY_PROMPT = """You are auditing action annotations of an object-manipulation video. The actor may be a
+robot arm/gripper, a human hand or hands (e.g. an egocentric or demonstration recording), or unclear — do not
+assume it is a robot. For each annotation you get its id, claimed time interval, claimed action, and frames
+sampled at its start, middle and end.
 Judge whether the frames support the claimed action:
-- "supported": the frames are consistent with the claimed action, including the object involved.
-- "contradicted": the frames show something clearly different (wrong action, wrong object, or no action).
+- "supported": the frames are consistent with the claimed action, including the object and actor involved.
+- "contradicted": the frames show something clearly different (wrong action, wrong object, wrong actor
+  identity — e.g. claimed a robot but a human hand is shown, or vice versa — or no action).
 - "insufficient": the frames cannot settle it (e.g. the action is too brief to see in stills).
-In "observed", briefly state what the robot actually appears to do. Be strict about object identity and
+In "observed", briefly state what the actor actually appears to do. Be strict about object identity and
 about whether the claimed state change (grasped / lifted / released / placed) is visible."""
 
 

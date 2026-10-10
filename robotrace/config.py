@@ -46,8 +46,8 @@ def _float(name: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class Settings:
-    max_upload_mb: float = field(default_factory=lambda: _float("ROBOTRACE_MAX_UPLOAD_MB", 200))
-    max_duration_s: float = field(default_factory=lambda: _float("ROBOTRACE_MAX_DURATION_S", 180))
+    max_upload_mb: float = field(default_factory=lambda: _float("ROBOTRACE_MAX_UPLOAD_MB", 500))
+    max_duration_s: float = field(default_factory=lambda: _float("ROBOTRACE_MAX_DURATION_S", 1200))
     work_dir: Path = field(default_factory=lambda: Path(
         os.environ.get("ROBOTRACE_WORK_DIR", Path(tempfile.gettempdir()) / "robotrace")))
     anthropic_model: str = field(default_factory=lambda: os.environ.get("ROBOTRACE_CLAUDE_MODEL", "claude-opus-5-5"))
@@ -61,10 +61,11 @@ class Settings:
     muse_model: str = field(default_factory=lambda: os.environ.get("ROBOTRACE_MUSE_MODEL",
                                                                    "muse-spark-1.3-contributor"))
     opencode_timeout_s: float = field(default_factory=lambda: _float("ROBOTRACE_OPENCODE_TIMEOUT_S", 180))
-    # Frame sampling for the muse / gemini engines (see robotrace/sampling.py). "legacy" keeps the original
-    # single-request ~1 frame/s plan; "windowed" uses a fixed spacing over overlapping windows.
-    sampling_mode: str = field(default_factory=lambda: "windowed" if os.environ.get(
-        "ROBOTRACE_SAMPLING", "legacy").strip().lower() == "windowed" else "legacy")
+    # Frame sampling for the muse / gemini engines (see robotrace/sampling.py). "windowed" (default) uses a
+    # fixed spacing over overlapping windows, so coverage does not thin out as videos get longer; "legacy" is
+    # the original single-request ~1 frame/s plan, kept available for lower cost/latency on short videos.
+    sampling_mode: str = field(default_factory=lambda: "legacy" if os.environ.get(
+        "ROBOTRACE_SAMPLING", "windowed").strip().lower() == "legacy" else "windowed")
     frame_spacing_s: float = field(default_factory=lambda: _float("ROBOTRACE_FRAME_SPACING_S", 0.5))
     window_overlap_s: float = field(default_factory=lambda: _float("ROBOTRACE_WINDOW_OVERLAP_S", 1.0))
     max_windows: int = field(default_factory=lambda: int(_float("ROBOTRACE_MAX_WINDOWS", 4)))

@@ -120,6 +120,112 @@ def test_model_text_cannot_inject_markdown_links_or_images(tmp_path, monkeypatch
 
 
 @pytest.mark.skipif(not (ROOT / "data/sample/robotrace_sample.mp4").exists(), reason="no sample")
+def test_zero_annotations_with_no_actor_visible_gets_a_specific_reason(tmp_path, monkeypatch):
+    """A vision engine correctly finding no robot AND no human in any frame (e.g. an empty/idle scene)
+    produces zero annotations and a 'no robot or human actor visible' warning (see
+    annotation_engine._annotate_frame_windows); the Analyze page should explain that specific reason, not
+    just say 'no annotations' as if it were an unexplained failure. Covers the real user report where the
+    engine was working correctly on an out-of-domain (non-robot) video, not a bug in parsing/storage —
+    generalised so the message doesn't itself assume every video should contain a robot."""
+    import robotrace.pipeline as pl
+    monkeypatch.setenv("ROBOTRACE_WORK_DIR", str(tmp_path))
+    real = pl.process_video
+
+    def fake(*a, **k):
+        sess = real(*a, **k)
+        sess.annotations = []
+        sess.processing.warnings = sess.processing.warnings + [
+            "OpenCode Go (muse-spark-1.3-contributor) reported no robot or human actor visible in the "
+            "sampled frames, so no actions were found. This is a valid result for a video with no visible "
+            "manipulation, not a processing error."]
+        return sess
+    monkeypatch.setattr(pl, "process_video", fake)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Analyze").run()
+    next(r for r in at.radio if r.label == "Source").set_value("Bundled synthetic sample").run()
+    next(b for b in at.button if b.label == "Run analysis").click().run()
+    assert not at.exception
+    warnings = [w.value for w in at.warning]
+    assert any("no robot or human performing a visible" in w and "not an error" in w for w in warnings)
+    assert not any(w == "The engine returned no annotations. You can still add annotations manually in Review."
+                  for w in warnings)
+
+
+@pytest.mark.skipif(not (ROOT / "data/sample/robotrace_sample.mp4").exists(), reason="no sample")
+def test_zero_annotations_without_a_specific_reason_keeps_the_generic_message(tmp_path, monkeypatch):
+    """Zero annotations for any OTHER reason (not 'no actor visible') still gets the generic message, not
+    a misleading actor-specific explanation."""
+    import robotrace.pipeline as pl
+    monkeypatch.setenv("ROBOTRACE_WORK_DIR", str(tmp_path))
+    real = pl.process_video
+
+    def fake(*a, **k):
+        sess = real(*a, **k)
+        sess.annotations = []
+        return sess
+    monkeypatch.setattr(pl, "process_video", fake)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Analyze").run()
+    next(r for r in at.radio if r.label == "Source").set_value("Bundled synthetic sample").run()
+    next(b for b in at.button if b.label == "Run analysis").click().run()
+    assert not at.exception
+    warnings = [w.value for w in at.warning]
+    assert "The engine returned no annotations. You can still add annotations manually in Review." in warnings
+    assert not any("no robot or human performing a visible" in w for w in warnings)
+
+
+@pytest.mark.skipif(not (ROOT / "data/sample/robotrace_sample.mp4").exists(), reason="no sample")
+def test_zero_annotations_with_actor_visible_but_no_action_keeps_the_generic_message(tmp_path, monkeypatch):
+    """An actor IS visible (e.g. human_visible=True) but the engine still found nothing to annotate (idle
+    footage): this is a different state from 'no actor at all' and must not claim no actor was seen."""
+    import robotrace.pipeline as pl
+    monkeypatch.setenv("ROBOTRACE_WORK_DIR", str(tmp_path))
+    real = pl.process_video
+
+    def fake(*a, **k):
+        sess = real(*a, **k)
+        sess.annotations = []  # no "no robot or human actor visible" warning added: an actor WAS seen
+        return sess
+    monkeypatch.setattr(pl, "process_video", fake)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Analyze").run()
+    next(r for r in at.radio if r.label == "Source").set_value("Bundled synthetic sample").run()
+    next(b for b in at.button if b.label == "Run analysis").click().run()
+    assert not at.exception
+    warnings = [w.value for w in at.warning]
+    assert "The engine returned no annotations. You can still add annotations manually in Review." in warnings
+    assert not any("no robot or human" in w for w in warnings)
+
+
+@pytest.mark.skipif(not (ROOT / "data/sample/robotrace_sample.mp4").exists(), reason="no sample")
+def test_zero_annotation_session_does_not_crash_dashboard_or_export(tmp_path, monkeypatch):
+    """Downstream Review/Dashboard/Export compatibility: a session with zero annotations (and the one QC
+    gap flag that implies) must not crash any page, and the flag must render as a flag, not an error."""
+    import robotrace.pipeline as pl
+    monkeypatch.setenv("ROBOTRACE_WORK_DIR", str(tmp_path))
+    real = pl.process_video
+
+    def fake(*a, **k):
+        sess = real(*a, **k)
+        sess.annotations = []
+        from robotrace.quality_engine import run_qc
+        sess.flags = run_qc(sess.annotations, sess.video.duration_s, None, {})
+        return sess
+    monkeypatch.setattr(pl, "process_video", fake)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Analyze").run()
+    next(r for r in at.radio if r.label == "Source").set_value("Bundled synthetic sample").run()
+    next(b for b in at.button if b.label == "Run analysis").click().run()
+    assert not at.exception
+    for page in ("Review", "Dashboard", "Export"):
+        at.sidebar.radio[0].set_value(page).run()
+        assert not at.exception, page
+    # the gap flag must appear as a flag (e.g. in the review queue's "unassigned findings"), never as
+    # st.error, which would look like a processing failure rather than a QC finding
+    assert not list(at.error)
+
+
+@pytest.mark.skipif(not (ROOT / "data/sample/robotrace_sample.mp4").exists(), reason="no sample")
 def test_analyze_page_escapes_model_text_in_warnings_and_engine_detail(tmp_path, monkeypatch):
     """Warnings, engine detail and scene summary are shown on the Analyze page right after a run."""
     import robotrace.pipeline as pl

@@ -24,6 +24,10 @@ def keyed(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)  # present, to prove Gemini is not called
     monkeypatch.delenv("ROBOTRACE_MUSE_MODEL", raising=False)
     monkeypatch.delenv("ROBOTRACE_OPENCODE_GO_URL", raising=False)
+    # These tests check request/response FORMAT, not sampling behavior (see module docstring); pin legacy's
+    # frame layout so the hardcoded first_frame_t/last_frame_t in answer() stay groundable regardless of
+    # which sampling mode is the current default (see robotrace/sampling.py, tests/test_sampling_windows.py).
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "legacy")
     return Settings()
 
 
@@ -171,10 +175,10 @@ def test_end_to_end_sends_timestamped_frames_runs_qc_and_never_calls_gemini(keye
 
     p = sess.processing
     assert (p.adapter, p.provider, p.model) == ("muse", "OpenCode Go", "muse-spark-1.3-contributor")
-    assert p.prompt_version == ae.OBSERVATION_PROMPT_VERSION == "obs-v3"
+    assert p.prompt_version == ae.OBSERVATION_PROMPT_VERSION == "obs-v4"
     prompt = " ".join(content[0]["text"].split())
     assert "never add a step that no frame shows" in prompt          # distinct steps, but only visible ones
-    assert "first frame where the arm has visibly moved" in prompt   # exclude initial still frames
+    assert "first frame where it has visibly moved" in prompt        # exclude initial still frames
     assert "if unsure, say so" in prompt                             # hedge uncertain colours
     assert p.is_live_inference and not p.is_precomputed_sample and "resp_muse_123" in p.adapter_detail
     assert any("train future Meta models" in w for w in p.warnings)

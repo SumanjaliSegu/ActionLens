@@ -14,7 +14,7 @@ import requests
 from robotrace import annotation_engine as ae
 from robotrace.config import Settings
 from robotrace.pipeline import process_video
-from robotrace.sampling import merge_window_annotations, plan_sampling, same_action, sampling_config
+from robotrace.sampling import describe_sampling, merge_window_annotations, plan_sampling, same_action, sampling_config
 from robotrace.schemas import Annotation
 from robotrace.video_processor import probe, uniform_times
 
@@ -32,14 +32,19 @@ def test_default_legacy_plan_reproduces_original_frame_times(dur):
     assert p.spacing_s == pytest.approx(dur / old_n)
 
 
-def test_default_settings_are_legacy(monkeypatch):
+def test_default_settings_are_windowed(monkeypatch):
+    """windowed is the default so coverage does not thin out on long videos (see README); legacy must be
+    chosen explicitly, and an unrecognised value falls back to the safer (denser) default, not to legacy."""
     monkeypatch.delenv("ROBOTRACE_SAMPLING", raising=False)
     monkeypatch.delenv("ROBOTRACE_MAX_FRAMES", raising=False)
-    assert sampling_config(Settings()) == LEGACY
-    monkeypatch.setenv("ROBOTRACE_SAMPLING", "windowed")
-    assert sampling_config(Settings())["mode"] == "windowed"
-    monkeypatch.setenv("ROBOTRACE_SAMPLING", "bogus")
+    monkeypatch.delenv("ROBOTRACE_FRAME_SPACING_S", raising=False)
+    monkeypatch.delenv("ROBOTRACE_WINDOW_OVERLAP_S", raising=False)
+    monkeypatch.delenv("ROBOTRACE_MAX_WINDOWS", raising=False)
+    assert sampling_config(Settings()) == WINDOWED
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "legacy")
     assert sampling_config(Settings())["mode"] == "legacy"
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "bogus")
+    assert sampling_config(Settings())["mode"] == "windowed"
 
 
 def test_windowed_short_clip_is_one_denser_request():
@@ -63,6 +68,26 @@ def test_windowed_cost_cap_widens_spacing_and_says_so():
     p = plan_sampling(180.0, WINDOWED)
     assert p.capped and p.n_requests == 4 and p.spacing_s > 0.5 and p.windows[-1].end == 180.0
     assert p.spacing_s < 180.0 / 24                             # still denser than legacy (7.5 s)
+
+
+# -------------------------------------------------------------------------------------- UI-facing reporting
+def test_describe_sampling_reports_windows_frames_and_interval_before_running():
+    """What the Analyze page shows before running inference (Goal C): planned requests, total frames,
+    frames/window and the sampling interval — all computed from the actual plan, not guessed."""
+    text = describe_sampling(WINDOWED, duration=24.6)
+    p = plan_sampling(24.6, WINDOWED)
+    assert f"{p.n_requests} model request" in text and f"{p.n_frames} frames" in text
+    assert f"{p.spacing_s:.2f}s spacing" in text and "frames/window" in text
+
+
+def test_describe_sampling_explains_the_cap_and_names_the_knobs_to_fix_it():
+    text = describe_sampling(WINDOWED, duration=180.0)
+    assert "capped at 4 requests" in text and "ROBOTRACE_MAX_WINDOWS" in text and "ROBOTRACE_FRAME_SPACING_S" in text
+
+
+def test_describe_sampling_uncapped_short_video_has_no_cap_explanation():
+    text = describe_sampling(WINDOWED, duration=7.7)
+    assert "capped" not in text and "ROBOTRACE_MAX_WINDOWS" not in text
 
 
 # ------------------------------------------------------------------------------- merging
@@ -212,7 +237,7 @@ def test_all_ungrounded_output_is_a_failure_not_an_empty_result(monkeypatch, tin
 
 def test_legacy_mode_sends_one_request_with_original_frames(monkeypatch, tiny_video):
     monkeypatch.setenv("OPENCODE_GO_API_KEY", "test-key-not-real")
-    monkeypatch.delenv("ROBOTRACE_SAMPLING", raising=False)
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "legacy")
     calls = fake_responses_api(monkeypatch, one_action)
     sess = process_video(tiny_video, probe(tiny_video), "muse", settings=Settings())
     assert len(calls) == 1 and sess.processing.sampling["config"] == LEGACY

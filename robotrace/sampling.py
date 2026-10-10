@@ -85,9 +85,17 @@ def plan_sampling(duration: float, cfg: dict) -> SamplingPlan:
 def describe_sampling(cfg: dict, duration: float | None = None) -> str:
     if duration:
         p = plan_sampling(duration, cfg)
-        extra = " (spacing widened to stay within the request limit)" if p.capped else ""
-        return (f"{cfg['mode']} sampling: {p.n_frames} frames at ~{p.spacing_s:.2f}s spacing, "
-                f"{p.n_requests} model request(s){extra}")
+        if p.n_requests == 0:
+            return f"{cfg['mode']} sampling: no frames could be planned for this video"
+        per_window = p.n_frames / p.n_requests
+        extra = ""
+        if p.capped:
+            extra = (f" (more windows would be needed for full {cfg.get('spacing_s', 0):.2f}s spacing; capped at "
+                     f"{cfg['max_windows']} requests by ROBOTRACE_MAX_WINDOWS, so spacing was widened — raise "
+                     "ROBOTRACE_MAX_WINDOWS or ROBOTRACE_FRAME_SPACING_S for denser coverage)")
+        cost_note = (" — more requests mean more API cost and latency" if p.n_requests > 1 else "")
+        return (f"{cfg['mode']} sampling: {p.n_frames} frames at ~{p.spacing_s:.2f}s spacing "
+                f"(~{per_window:.0f} frames/window), {p.n_requests} model request(s){cost_note}{extra}")
     if cfg["mode"] == "legacy":
         return f"legacy sampling: ~1 frame/s, at most {cfg['max_frames']} frames, 1 model request"
     return (f"windowed sampling: ~{cfg['spacing_s']:.2f}s spacing, at most {cfg['max_frames']} frames per request, "
@@ -141,6 +149,10 @@ def merge_window_annotations(per_window: list[list[Annotation]], tol: float) -> 
             p.visual_evidence = f"{p.visual_evidence} | {a.visual_evidence}".strip(" |")[:500]
         if p.confidence is not None and a.confidence is not None:
             p.confidence = min(p.confidence, a.confidence)  # conservative; never invented
+        if a.actor and a.actor != p.actor:
+            # Windows disagree on who performed the same merged action: assert an identity only when both
+            # windows agree, or one of them didn't report one. On disagreement, don't pick a side.
+            p.actor = "" if p.actor else a.actor
         srcs.add(i)
         merged += 1
     result = [a for a, _ in out]

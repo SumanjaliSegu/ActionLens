@@ -21,6 +21,10 @@ KEY = "AIza-test-key-not-real"
 def keyed(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
     monkeypatch.setenv("ROBOTRACE_GEMINI_MODEL", "gemini-test-model")
+    # These tests check response FORMAT, not sampling behavior (see module docstring); pin legacy's frame
+    # layout so the hardcoded first_frame_t/last_frame_t in answer() stay groundable regardless of which
+    # sampling mode is the current default (see robotrace/sampling.py, tests/test_sampling_windows.py).
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "legacy")
     return Settings()
 
 
@@ -168,9 +172,12 @@ def test_adapter_end_to_end_with_qc(keyed, monkeypatch, tiny_video):
 
 
 def test_no_robot_visible_is_reported_not_hidden(keyed, monkeypatch, tiny_video, tmp_path):
+    # human_visible defaults False (not set here), so with robot_visible also False this is "no actor at
+    # all" -- see test_actor_identification.py for the human_visible=True ("actor present, no action")
+    # case, which must NOT produce this warning.
     fake_post(monkeypatch, body=api_body(answer(robot_visible=False, actions=[])))
     res = ae.GeminiFrameAdapter(keyed).annotate(tiny_video, probe(tiny_video), tmp_path)
-    assert res.annotations == [] and any("no robot is visible" in w for w in res.warnings)
+    assert res.annotations == [] and any("no robot or human actor visible" in w for w in res.warnings)
 
 
 def test_schema_violation_fails_instead_of_guessing(keyed, monkeypatch, tiny_video, tmp_path):

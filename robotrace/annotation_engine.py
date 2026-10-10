@@ -122,6 +122,7 @@ class MotionSegmentationAdapter:
 class _VLMSegment(BaseModel):
     start: float
     end: float
+    actor: str = ""
     action: str
     confidence: float = Field(ge=0, le=1)
 
@@ -135,19 +136,25 @@ _SEGMENT_SCHEMA = {
     "properties": {"segments": {"type": "array", "items": {
         "type": "object",
         "properties": {"start": {"type": "number"}, "end": {"type": "number"},
+                       "actor": {"type": "string", "enum": ["robot", "human", "unclear"]},
                        "action": {"type": "string"}, "confidence": {"type": "number"}},
-        "required": ["start", "end", "action", "confidence"], "additionalProperties": False}}},
+        "required": ["start", "end", "actor", "action", "confidence"], "additionalProperties": False}}},
     "required": ["segments"], "additionalProperties": False,
 }
 
-_ANNOTATE_PROMPT = """You are annotating a robot manipulation video for a robotics training dataset.
+_ANNOTATE_PROMPT = """You are annotating an object-manipulation video for a robot-learning dataset. The actor
+performing the manipulation may be a robot arm/gripper, a human hand or hands (e.g. an egocentric or
+demonstration recording), both, or neither — do not assume it is a robot.
 You are given {n} still frames sampled from a {dur:.2f}-second video; each is preceded by its timestamp.
-Identify the sequence of robot actions (e.g. "reach toward the red cube", "grasp the cup", "place the cup
-in the bin"). For each action return start and end timestamps in seconds within [0, {dur:.2f}], a short
-imperative description naming the object, and your confidence in [0,1].
+Identify the sequence of manipulation actions (e.g. "reach toward the red cube", "grasp the cup", "place the
+cup in the bin"). For each action return start and end timestamps in seconds within [0, {dur:.2f}], which
+actor performs it ("robot", "human", or "unclear" if the frames do not make it clearly one or the other —
+never guess, and never describe a human hand as a robot gripper or vice versa), a short imperative
+description naming the object, and your confidence in [0,1].
 Rules: segments must be in temporal order and must not overlap. Only describe what the frames show; do not
-invent actions for periods where the robot is idle. Because you only see frames every ~{step:.2f}s,
-place boundaries at the nearest frame timestamps."""
+invent actions for periods where no actor is visible or active. An empty list is a valid result for a video
+with no visible manipulation, not an error. Because you only see frames every ~{step:.2f}s, place boundaries
+at the nearest frame timestamps."""
 
 
 def _b64(path: str) -> str:
@@ -225,7 +232,8 @@ class ClaudeFrameAdapter:
         except ValidationError as e:
             raise AdapterUnavailable(f"Model output failed schema validation: {e.error_count()} errors.") from e
         anns = [Annotation(start=round(s.start, 2), end=round(s.end, 2), action=s.action.strip()[:200],
-                           confidence=s.confidence, confidence_kind="model_self_reported", source=self.name)
+                           confidence=s.confidence, confidence_kind="model_self_reported", source=self.name,
+                           actor=canonical_actor(s.actor))
                 for s in parsed.segments]
         return AnnotationResult(
             annotations=anns, adapter=self.name, is_live_inference=True,
@@ -244,35 +252,52 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{mode
 #           hedge uncertain colours
 #   obs-v3  obs-v2 + states the time range the frames cover; for multi-window sampling also says an action may
 #           be in progress at the first / last frame
-OBSERVATION_PROMPT_VERSION = "obs-v3"
+#   obs-v4  generalises from robot-only to any visible actor (robot arm and/or human hand(s)): adds
+#           "human_visible" alongside "robot_visible", adds a per-action "actor" field, and no longer frames
+#           the task as robot-exclusive, so egocentric/human-demonstration footage is described instead of
+#           silently producing zero actions (see Annotation.actor, robotrace/schemas.py)
+OBSERVATION_PROMPT_VERSION = "obs-v4"
 
-_GEMINI_PROMPT = """You are annotating a robot manipulation video for a robotics training dataset.
+_GEMINI_PROMPT = """You are annotating an object-manipulation video for a robot-learning dataset. The actor
+performing the manipulation may be a robot arm/gripper, a human hand or hands (e.g. an egocentric or
+demonstration recording), both, or neither.
 You are given {n} still frames sampled at ~{step:.2f}s spacing from {ws:.2f}s to {we:.2f}s of a {dur:.2f}-second
 video. Each frame is preceded by its timestamp in seconds from the start of the video; those timestamps are the
 only valid times.{partial}
-1. In "scene_summary", describe in one or two sentences what is visible (robot / arm / gripper, objects, setting).
-   Set "robot_visible" to false if no robot or robotic manipulator is visible in any frame.
-2. In "actions", list the robot actions you can see, in temporal order and without overlap.
+1. In "scene_summary", describe in one or two sentences what is visible (actor(s), objects, setting).
+   Set "robot_visible" to true only if a robot arm or robotic manipulator is visible in any frame.
+   Set "human_visible" to true only if a human hand or hands performing the manipulation are visible in any
+   frame. Both may be true (mixed scene), both may be false (no actor performing a visible action), or
+   exactly one may be true.
+2. In "actions", list the manipulation actions you can see, in temporal order and without overlap.
    - When the frames show them, split the manipulation into its distinct steps, each as its own action:
-     approach / reach toward the object; grasp (gripper closes on it); lift / transport (object held and
-     moving); place / release (object set down, gripper opens); retract / return (empty gripper moves away).
-     Merge steps only when the frames cannot separate them, and never add a step that no frame shows.
-   - If the robot is still in the first frames, the first action starts at the first frame where the arm has
+     approach / reach toward the object; grasp (hand closes or gripper closes on it); lift / transport (object
+     held and moving); place / release (object set down, hand or gripper opens); retract / return (empty
+     hand/gripper moves away). Merge steps only when the frames cannot separate them, and never add a step
+     that no frame shows.
+   - If the actor is still in the first frames, the first action starts at the first frame where it has
      visibly moved; do not include the still frames in it.
    - Name a colour only when it is clearly visible; if unsure, say so (e.g. "light green or yellow block").
+   - If it is genuinely unclear from the frames whether the actor is a robot or a human, set "actor" to
+     "unclear" and lower "confidence" accordingly — never guess one over the other without visual support,
+     and never describe a human hand as a robot gripper or vice versa.
    For each action give:
    - "first_frame_t" and "last_frame_t": timestamps of the first and last frame in which the action is visible,
      copied exactly from the frame labels (equal if the action is visible in only one frame);
+   - "actor": who performs this specific action — "robot", "human", or "unclear" if the frames do not make it
+     clearly one or the other;
    - "action": a short imperative description naming the object, e.g. "grasp the red cup";
    - "objects": the objects involved, as they appear, e.g. ["red cup", "grey bin"];
-   - "visual_evidence": what you actually see in the frames that shows this action (gripper position, contact,
-     object state change). Describe what is visible, not what you assume happened between frames;
+   - "visual_evidence": what you actually see in the frames that shows this action (hand/gripper position,
+     contact, object state change). Describe what is visible, not what you assume happened between frames;
    - "evidence_frame_times": timestamps of the frames that show that evidence;
    - "confidence": your confidence in [0, 1].
-Only describe what the frames show. Do not invent actions for periods where the robot is idle or not visible.
-If you cannot identify any action, return an empty "actions" list."""
+Only describe what the frames show. Do not invent actions for periods where no actor is visible or active, and
+never invent an action or an actor's identity beyond what the frames support — report low confidence instead.
+If you cannot identify any action, return an empty "actions" list; this is a valid, expected result for a
+video with no visible manipulation, not an error."""
 
-_GEMINI_ACTION_FIELDS = ["first_frame_t", "last_frame_t", "action", "objects", "visual_evidence",
+_GEMINI_ACTION_FIELDS = ["first_frame_t", "last_frame_t", "actor", "action", "objects", "visual_evidence",
                          "evidence_frame_times", "confidence"]
 # Gemini responseSchema (OpenAPI subset).
 _GEMINI_SCHEMA = {
@@ -280,24 +305,44 @@ _GEMINI_SCHEMA = {
     "properties": {
         "scene_summary": {"type": "STRING"},
         "robot_visible": {"type": "BOOLEAN"},
+        "human_visible": {"type": "BOOLEAN"},
         "actions": {"type": "ARRAY", "items": {
             "type": "OBJECT",
             "properties": {"first_frame_t": {"type": "NUMBER"}, "last_frame_t": {"type": "NUMBER"},
-                           "action": {"type": "STRING"},
+                           "actor": {"type": "STRING"}, "action": {"type": "STRING"},
                            "objects": {"type": "ARRAY", "items": {"type": "STRING"}},
                            "visual_evidence": {"type": "STRING"},
                            "evidence_frame_times": {"type": "ARRAY", "items": {"type": "NUMBER"}},
                            "confidence": {"type": "NUMBER"}},
             "required": _GEMINI_ACTION_FIELDS, "propertyOrdering": _GEMINI_ACTION_FIELDS}},
     },
-    "required": ["scene_summary", "robot_visible", "actions"],
-    "propertyOrdering": ["scene_summary", "robot_visible", "actions"],
+    "required": ["scene_summary", "robot_visible", "human_visible", "actions"],
+    "propertyOrdering": ["scene_summary", "robot_visible", "human_visible", "actions"],
 }
+
+
+def canonical_actor(raw: str) -> str:
+    """Normalise the model's free-text 'actor' to one of 'robot', 'human', 'unclear', '' (not reported).
+
+    Tolerant of phrasing variance ("human hand", "person", "operator" -> human; "robot arm", "gripper",
+    "manipulator" -> robot) without ever asserting an identity the raw text doesn't support.
+    """
+    t = raw.strip().lower()
+    if not t:
+        return ""
+    if "unclear" in t or "ambiguous" in t or "uncertain" in t:
+        return "unclear"
+    if "human" in t or "person" in t or "hand" in t or "operator" in t:
+        return "human"
+    if "robot" in t or "gripper" in t or "manipulator" in t or "arm" in t:
+        return "robot"
+    return "unclear"
 
 
 class _GeminiAction(BaseModel):
     first_frame_t: float
     last_frame_t: float
+    actor: str = ""
     action: str = Field(min_length=1)
     objects: list[str] = Field(default_factory=list)
     visual_evidence: str = ""
@@ -308,6 +353,7 @@ class _GeminiAction(BaseModel):
 class _GeminiOutput(BaseModel):
     scene_summary: str = ""
     robot_visible: bool
+    human_visible: bool = False
     actions: list[_GeminiAction]
 
 
@@ -420,7 +466,7 @@ def gemini_actions_to_annotations(out: _GeminiOutput, frame_times: list[float], 
             confidence=act.confidence, confidence_kind="model_self_reported", source=source,
             objects=[o.strip()[:80] for o in act.objects if o.strip()][:10],
             visual_evidence=act.visual_evidence.strip()[:500], cited_frame_times=sorted(cited),
-            boundary_precision_s=round(half, 2)))
+            boundary_precision_s=round(half, 2), actor=canonical_actor(act.actor)))
     return anns, dropped
 
 
@@ -468,7 +514,7 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
     if not plan.windows:
         raise AdapterUnavailable("No frames could be decoded from this video.")
     multi = plan.n_requests > 1
-    per_window, infos, summaries, visible, object_sets, windows_used = [], [], [], [], [], []
+    per_window, infos, summaries, robot_vis, human_vis, object_sets, windows_used = [], [], [], [], [], [], []
     n_frames = dropped = rejected = 0
     step = plan.spacing_s
     for w in plan.windows:
@@ -494,7 +540,8 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
         per_window.append(anns)
         infos.append(info)
         summaries.append(parsed.scene_summary.strip())
-        visible.append(parsed.robot_visible)
+        robot_vis.append(parsed.robot_visible)
+        human_vis.append(parsed.human_visible)
         object_sets.append(sorted({o.lower() for a_ in anns for o in a_.objects}))
         windows_used.append([w.start, w.end, len(frames)])
         n_frames += len(frames)
@@ -512,10 +559,18 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
     if plan.capped:
         warnings.append(f"The video is too long for {cfg['spacing_s']:.2f}s spacing within {cfg['max_windows']} "
                         f"requests; spacing was widened to ~{plan.spacing_s:.2f}s.")
-    if not any(visible):
-        warnings.append(f"{provider} ({model}) reported that no robot is visible in the sampled frames.")
-    elif not all(visible):
-        warnings.append(f"Windows disagree on whether a robot is visible ({sum(visible)}/{len(visible)} say yes).")
+    any_actor = [r or h for r, h in zip(robot_vis, human_vis)]
+    if not any(any_actor):
+        warnings.append(f"{provider} ({model}) reported no robot or human actor visible in the sampled "
+                        "frames, so no actions were found. This is a valid result for a video with no "
+                        "visible manipulation, not a processing error.")
+    else:
+        if 0 < sum(robot_vis) < len(robot_vis):
+            warnings.append(f"Windows disagree on whether a robot is visible "
+                            f"({sum(robot_vis)}/{len(robot_vis)} say yes).")
+        if 0 < sum(human_vis) < len(human_vis):
+            warnings.append(f"Windows disagree on whether a human is visible "
+                            f"({sum(human_vis)}/{len(human_vis)} say yes).")
     if multi and len({tuple(s) for s in object_sets if s}) > 1:
         warnings.append("Object names differ between windows: " + "; ".join(", ".join(s) for s in object_sets if s)
                         + ". Check that they refer to the same objects.")
@@ -575,9 +630,9 @@ class GeminiFrameAdapter:
 # "Authorization: Bearer <key>". Go asks clients to send their own User-Agent and a stable x-opencode-session.
 _MUSE_JSON_ONLY = """
 Respond with ONLY one JSON object (no prose, no markdown fences) of exactly this shape:
-{"scene_summary": string, "robot_visible": boolean, "actions": [{"first_frame_t": number,
- "last_frame_t": number, "action": string, "objects": [string], "visual_evidence": string,
- "evidence_frame_times": [number], "confidence": number}]}"""
+{"scene_summary": string, "robot_visible": boolean, "human_visible": boolean, "actions": [{"first_frame_t":
+ number, "last_frame_t": number, "actor": "robot"|"human"|"unclear", "action": string, "objects": [string],
+ "visual_evidence": string, "evidence_frame_times": [number], "confidence": number}]}"""
 
 MUSE_DATA_NOTICE = ("Data use: OpenCode's docs state that Muse Spark contributor models may use prompts and "
                     "completions (here, the sampled video frames) to train future Meta models, and that they are "

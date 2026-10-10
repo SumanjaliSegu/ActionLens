@@ -71,6 +71,22 @@ def validate_upload(filename: str, size_bytes: int, settings: Settings) -> None:
         raise VideoError(f"File is {size_bytes / 1e6:.1f} MB; the limit is {settings.max_upload_mb:.0f} MB.")
     if size_bytes == 0:
         raise VideoError("The uploaded file is empty.")
+    validate_disk_space(size_bytes, settings)
+
+
+def validate_disk_space(size_bytes: int, settings: Settings, safety_factor: float = 3.0) -> None:
+    """The upload itself plus a transcoded copy and extracted frames can together need several times the
+    original file size on disk. Refuse early with a clear message rather than failing partway through."""
+    try:
+        settings.work_dir.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(settings.work_dir).free
+    except OSError:
+        return  # cannot determine free space; do not block the upload on that basis
+    needed = size_bytes * safety_factor
+    if free < needed:
+        raise VideoError(
+            f"Not enough temporary disk space: {free / 1e6:.0f} MB free, ~{needed / 1e6:.0f} MB needed "
+            f"(upload plus transcoding and frame cache). Free up space or reduce ROBOTRACE_MAX_UPLOAD_MB.")
 
 
 def validate_duration(meta: VideoMetadata, settings: Settings) -> None:
@@ -98,7 +114,18 @@ def uniform_times(duration: float, n: int) -> list[float]:
 
 def extract_frames(path: Path, meta: VideoMetadata, times: Iterable[float], out_dir: Path,
                    max_width: int = 640) -> list[EvidenceFrame]:
-    """Decode frames at the given timestamps (one sequential pass) and save JPEGs to out_dir."""
+    """Decode frames at the given timestamps (one sequential pass from the first wanted frame) and save
+    JPEGs to out_dir.
+
+    Seeks to the first wanted frame before scanning, instead of always starting at frame 0: without this,
+    a call for frames late in a long video (e.g. one windowed-sampling window of several) must grab/decode
+    through everything before it every time, which is O(video length) per call and compounds badly across
+    many windows (measured: ~550s of pure decode time for 10 windows on a 768s video, before any model
+    call). Seek landing position is backend/codec-dependent (it may land on the nearest prior keyframe,
+    not exactly the requested frame), so the actual landed position is read back and used as the scan
+    start rather than trusted blindly; the sequential grab/read loop below is unchanged, so frame-index
+    correctness does not depend on seek accuracy, only speed does.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     wanted: dict[int, float] = {}
     for t in times:
@@ -108,8 +135,13 @@ def extract_frames(path: Path, meta: VideoMetadata, times: Iterable[float], out_
     results: list[EvidenceFrame] = []
     cap = cv2.VideoCapture(str(path))
     try:
-        last = max(wanted)
+        first, last = min(wanted), max(wanted)
         idx = 0
+        if first > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+            landed = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+            if 0 <= landed <= first:
+                idx = landed
         while idx <= last:
             if idx in wanted:
                 ok, frame = cap.read()

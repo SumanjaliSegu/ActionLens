@@ -157,7 +157,7 @@ Free CPU Spaces sleep after inactivity, and the first load after sleep takes abo
 | `ROBOTRACE_MUSE_MODEL` | `muse-spark-1.3-contributor` | OpenCode Go model id |
 | `ROBOTRACE_OPENCODE_GO_URL` | `https://opencode.ai/zen/go/v1` | OpenCode Go base URL |
 | `ROBOTRACE_OPENCODE_TIMEOUT_S` | `180` | OpenCode Go request timeout |
-| `ROBOTRACE_SAMPLING` | `legacy` | Frame sampling for `muse` / `gemini`: `legacy` = one request, ~1 frame/s, ≤ `ROBOTRACE_MAX_FRAMES` frames (spacing grows with video length); `windowed` = fixed spacing over overlapping windows, one request per window (more requests and tokens; see `robotrace/sampling.py`) |
+| `ROBOTRACE_SAMPLING` | `windowed` | Frame sampling for `muse` / `gemini`: `windowed` (default) = fixed spacing over overlapping windows, one request per window, so coverage does not thin out on longer videos; `legacy` = one request, ~1 frame/s, ≤ `ROBOTRACE_MAX_FRAMES` frames total (spacing grows with video length — cheaper/faster on short videos, sparse on long ones; see `robotrace/sampling.py`) |
 | `ROBOTRACE_FRAME_SPACING_S` | `0.5` | Target frame spacing in `windowed` mode |
 | `ROBOTRACE_WINDOW_OVERLAP_S` | `1.0` | Overlap between consecutive windows |
 | `ROBOTRACE_MAX_WINDOWS` | `4` | Request cap per video in `windowed` mode; beyond it the spacing is widened (with a warning) |
@@ -167,8 +167,8 @@ Free CPU Spaces sleep after inactivity, and the first load after sleep takes abo
 | `ROBOTRACE_REMOTE_URL` | — | Base URL of the GPU notebook service |
 | `ROBOTRACE_REMOTE_TOKEN` | — | Bearer token for that service (secret) |
 | `ROBOTRACE_REMOTE_TIMEOUT_S` | 300 | Remote request timeout |
-| `ROBOTRACE_MAX_UPLOAD_MB` | 200 | Upload size limit (keep `.streamlit/config.toml` `maxUploadSize` ≥ this) |
-| `ROBOTRACE_MAX_DURATION_S` | 180 | Video duration limit |
+| `ROBOTRACE_MAX_UPLOAD_MB` | 500 | RoboTrace's own upload size limit. **Capped by `.streamlit/config.toml`'s `maxUploadSize`** (also 500 by default) — that setting is Streamlit's own server-side request-body ceiling; anything above it is rejected by Streamlit itself before this app ever sees it. Raise both together, or override the server ceiling without editing the file via `STREAMLIT_SERVER_MAX_UPLOAD_SIZE`. The app shows and enforces whichever of the two is lower. |
+| `ROBOTRACE_MAX_DURATION_S` | 1200 | Video duration limit (20 minutes) |
 | `ROBOTRACE_MAX_FRAMES` | 24 | Frames per vision-model request (`muse`, `gemini`, `claude`; cost/latency bound) |
 | `ROBOTRACE_WORK_DIR` | `<tmp>/robotrace` | Uploads and frame cache. Uploads older than 6 h are deleted |
 
@@ -184,8 +184,18 @@ review and export features are free.
 
 ## Security & reliability
 
-- Uploads: extension allow-list, size and duration limits, decode check. Files are stored under random names
-  (the user's filename is never used as a path), and the previous upload is deleted on a new upload.
+- Uploads: extension allow-list, size and duration limits, free-disk-space check, decode check. Files are
+  stored under random names (the user's filename is never used as a path), and the previous upload is
+  deleted on a new upload.
+- **Upload memory note:** `st.file_uploader`'s `UploadedFile` is a `BytesIO` — Streamlit itself holds the
+  whole upload in server RAM before this app's code runs, regardless of upload size. RoboTrace's own code
+  does not add a second full in-memory copy on top of that (frames extracted from the saved file are
+  decoded by OpenCV one at a time, not loaded as a whole video), and writes the saved copy in 1 MB chunks,
+  but it cannot make the initial upload itself streaming while using this widget. Raising
+  `ROBOTRACE_MAX_UPLOAD_MB` / `maxUploadSize` trades upload size for the host's available RAM; pick a limit
+  your host can hold a few times over (concurrent sessions each hold their own upload in memory). Hosting
+  platforms (Hugging Face Spaces, Streamlit Community Cloud) may also impose their own ingress limits this
+  app cannot see or override.
 - ffmpeg is invoked with an argument list (no shell). Exports drop server file paths, and CSV text is
   neutralised against formula injection.
 - Model and remote output are schema-validated (Pydantic). Invented ids are ignored, and failures become readable

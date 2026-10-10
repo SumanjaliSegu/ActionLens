@@ -176,24 +176,24 @@ def test_report_serializes_and_markdown_has_table(tmp_path):
 # ------------------------------------------------------------------------------- inference: caching / failures
 def test_cached_success_is_reused_without_calling(tmp_path):
     from robotrace.annotation_engine import OBSERVATION_PROMPT_VERSION
-    path = tmp_path / "ep.json"
+    path = tmp_path / "ep.json"  # legacy record: no sampling field => LEGACY_SAMPLING
     path.write_text(json.dumps({"status": "ok", "annotations": [], "prompt_version": OBSERVATION_PROMPT_VERSION}),
                     encoding="utf-8")
     budget = {"calls": 0, "max_calls": 10}
     rec = ev.run_inference(tmp_path / "clip.mp4", path, live=True, retry_failed=False, budget=budget,
-                           process=lambda *a, **k: pytest.fail("must not call"))
+                           sampling=ev.LEGACY_SAMPLING, process=lambda *a, **k: pytest.fail("must not call"))
     assert rec["status"] == "ok" and rec["from_cache"] and budget["calls"] == 0
 
 
 def test_cached_prediction_from_other_prompt_version_is_never_reused_as_current(tmp_path):
-    path = tmp_path / "ep.json"  # legacy record: no prompt_version field => obs-v1
+    path = tmp_path / "ep.json"  # legacy record: no prompt_version or sampling field => obs-v1 / LEGACY_SAMPLING
     path.write_text(json.dumps({"status": "ok", "annotations": [{"start": 0, "end": 1, "action": "grasp"}]}),
                     encoding="utf-8")
     rec = ev.run_inference(tmp_path / "c.mp4", path, live=False, retry_failed=False,
-                           budget={"calls": 0, "max_calls": 1}, prompt_version="obs-v2")
+                           budget={"calls": 0, "max_calls": 1}, prompt_version="obs-v2", sampling=ev.LEGACY_SAMPLING)
     assert rec["status"] == "stale_cache" and "obs-v1" in rec["error"]
     same = ev.run_inference(tmp_path / "c.mp4", path, live=False, retry_failed=False,
-                            budget={"calls": 0, "max_calls": 1}, prompt_version="obs-v1")
+                            budget={"calls": 0, "max_calls": 1}, prompt_version="obs-v1", sampling=ev.LEGACY_SAMPLING)
     assert same["status"] == "ok" and same["prompt_version"] == "obs-v1"
 
 
@@ -308,6 +308,9 @@ def test_malformed_model_response_through_real_pipeline_is_a_failure(tmp_video, 
 
 def test_successful_pipeline_record_has_ids_and_tokens(tmp_video, tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_GO_API_KEY", "test-key-not-real")
+    # This test checks the eval cache RECORD format, not sampling; pin legacy so the hardcoded
+    # first_frame_t/last_frame_t below stay groundable regardless of the current default sampling mode.
+    monkeypatch.setenv("ROBOTRACE_SAMPLING", "legacy")
     body = {"id": "resp_x1", "model": "muse-spark-1.3-contributor", "status": "completed",
             "usage": {"input_tokens": 1234, "output_tokens": 56},
             "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps({

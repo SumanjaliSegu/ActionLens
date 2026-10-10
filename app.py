@@ -22,7 +22,7 @@ from robotrace.evaluation import Segment, evaluate_flags, evaluate_segments
 from robotrace.pipeline import SAMPLE_VIDEO, cache_dir_for, process_video, sample_metadata
 from robotrace.quality_engine import PRIORITY_RULE, model_verify, rank_annotations
 from robotrace.schemas import ReviewSession, ReviewStatus
-from robotrace.storage import cleanup_old_files
+from robotrace.storage import cleanup_old_files, write_in_chunks
 from robotrace.video_processor import (ALLOWED_EXTENSIONS, VideoError, make_browser_playable, probe,
                                        validate_duration, validate_upload)
 
@@ -30,6 +30,19 @@ st.set_page_config(page_title="RoboTrace — robotics annotation QC", page_icon=
                    initial_sidebar_state="expanded")
 SETTINGS = get_settings()
 PAGES = ["Overview", "Analyze", "Review", "Dashboard", "Export"]
+
+
+def effective_max_upload_mb() -> float:
+    """RoboTrace's own limit (ROBOTRACE_MAX_UPLOAD_MB), clamped to Streamlit's own server-side ceiling
+    (server.maxUploadSize / STREAMLIT_SERVER_MAX_UPLOAD_SIZE): uploads above that ceiling never reach our
+    code at all, so claiming a higher limit than it would be misleading."""
+    server_limit = st.config.get_option("server.maxUploadSize")
+    if server_limit and server_limit < SETTINGS.max_upload_mb:
+        return float(server_limit)
+    return SETTINGS.max_upload_mb
+
+
+MAX_UPLOAD_MB = effective_max_upload_mb()
 
 CSS = """
 <style>
@@ -259,6 +272,8 @@ def page_overview() -> None:
 
 # ------------------------------------------------------------------------------------------ analyze
 def save_upload(uploaded) -> Path:
+    if uploaded.size > MAX_UPLOAD_MB * 1024 * 1024:
+        raise VideoError(f"File is {uploaded.size / 1e6:.1f} MB; the limit is {MAX_UPLOAD_MB:.0f} MB.")
     validate_upload(uploaded.name, uploaded.size, SETTINGS)
     up_dir = SETTINGS.work_dir / "uploads"
     up_dir.mkdir(parents=True, exist_ok=True)
@@ -267,8 +282,10 @@ def save_upload(uploaded) -> Path:
         Path(old).unlink(missing_ok=True)
     # Never use the user-supplied name as a path component.
     dest = up_dir / f"{uuid.uuid4().hex}{Path(uploaded.name).suffix.lower()}"
-    with open(dest, "wb") as f:
-        f.write(uploaded.getbuffer())
+    # Streamlit's file_uploader already holds the whole upload in server memory (its UploadedFile is a
+    # BytesIO) before this function runs; write_in_chunks avoids adding a second full-size copy on top of
+    # that, it does not avoid the first one (see README "Security & reliability").
+    write_in_chunks(uploaded.getbuffer(), dest)
     S()["upload_path"] = str(dest)
     return dest
 
@@ -283,7 +300,7 @@ def page_analyze() -> None:
     uploaded = None
     if source == "Upload my video":
         uploaded = st.file_uploader(
-            f"Video file ({', '.join(sorted(e[1:] for e in ALLOWED_EXTENSIONS))}; ≤ {SETTINGS.max_upload_mb:.0f} MB, "
+            f"Video file ({', '.join(sorted(e[1:] for e in ALLOWED_EXTENSIONS))}; ≤ {MAX_UPLOAD_MB:.0f} MB, "
             f"≤ {SETTINGS.max_duration_s:.0f} s)", type=[e[1:] for e in ALLOWED_EXTENSIONS])
 
     st.markdown("#### Annotation engine")
@@ -351,7 +368,15 @@ def page_analyze() -> None:
     for w in sess.processing.warnings:
         st.warning(esc(w))
     if not sess.annotations:
-        st.warning("The engine returned no annotations. You can still add annotations manually in Review.")
+        if any("no robot or human actor visible" in w.lower() for w in sess.processing.warnings):
+            st.warning("No annotations because the engine found no robot or human performing a visible "
+                      "action in any sampled frame (see the warning above) — not an error. This is a "
+                      "valid, expected result for footage with no manipulation to annotate (e.g. an idle "
+                      "scene, or no actor in frame). If this video does show a robot or a person's hands "
+                      "manipulating something, try a different engine, a brighter/closer recording, or "
+                      "trim to the relevant segment. You can still add annotations manually in Review.")
+        else:
+            st.warning("The engine returned no annotations. You can still add annotations manually in Review.")
     st.button("Open review →", type="primary", on_click=goto, args=("Review",))
 
 
@@ -370,8 +395,8 @@ def engine_report(sess: ReviewSession) -> None:
     if any(a.visual_evidence or a.objects for a in sess.baseline):
         st.markdown("**Model observations** (boundaries are approximate; confidence is self-reported)")
         st.dataframe(pd.DataFrame([{
-            "start (s)": a.start, "end (s)": a.end, "± (s)": a.boundary_precision_s, "action": a.action,
-            "objects": ", ".join(a.objects), "visual evidence": a.visual_evidence,
+            "start (s)": a.start, "end (s)": a.end, "± (s)": a.boundary_precision_s, "actor": a.actor or "—",
+            "action": a.action, "objects": ", ".join(a.objects), "visual evidence": a.visual_evidence,
             "cited frames (s)": ", ".join(f"{t:.2f}" for t in a.cited_frame_times),
             "self-rated confidence (uncalibrated)": a.confidence} for a in sess.baseline]),
             hide_index=True, use_container_width=True)
@@ -470,6 +495,8 @@ def annotation_detail(sess: ReviewSession, a) -> None:
     st.markdown(f"### {esc(a.action)}", unsafe_allow_html=True)
     meta_bits = [f"`{a.id}`", f"{a.start:.2f}s → {a.end:.2f}s ({a.end - a.start:.2f}s)", f"source: {a.source}",
                  f"status: **{status.value}**"]
+    if a.actor:
+        meta_bits.append(f"actor: **{esc(a.actor)}**")
     if a.confidence is not None:
         meta_bits.append(f"model self-reported confidence {a.confidence:.2f} (uncalibrated)")
     if a.boundary_precision_s is not None:

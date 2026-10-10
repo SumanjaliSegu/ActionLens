@@ -1,5 +1,8 @@
 [server]
-maxUploadSize = 200
+# Hard server-side ceiling for file_uploader (Tornado request-body limit). Must be >= ROBOTRACE_MAX_UPLOAD_MB
+# or uploads above this value are rejected by Streamlit itself before the app ever sees them. Override
+# without editing this file via the STREAMLIT_SERVER_MAX_UPLOAD_SIZE environment variable.
+maxUploadSize = 500
 enableXsrfProtection = true
 headless = true
 
