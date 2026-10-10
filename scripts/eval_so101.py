@@ -241,9 +241,11 @@ def write_ivf(path: Path, frames: list[bytes], width: int, height: int, fps: int
             f.write(struct.pack("<IQ", len(fr), pts) + fr)
 
 
-def video_index(cache: Path, camera: str) -> dict:
-    url = f"{BASE}/videos/observation.images.{camera}/chunk-000/file-000.mp4"
-    head = cached(cache / f"video_{camera}_head.bin", lambda: http_get(url, (0, 65535))).read_bytes()
+def video_index(cache: Path, camera: str, base: str = BASE, file_index: int = 0) -> dict:
+    """Sample table of one LeRobot v3 video file (fetches only its header and moov box; cached)."""
+    url = f"{base}/videos/observation.images.{camera}/chunk-000/file-{file_index:03d}.mp4"
+    tag = camera if file_index == 0 else f"{camera}_f{file_index:03d}"
+    head = cached(cache / f"video_{tag}_head.bin", lambda: http_get(url, (0, 65535))).read_bytes()
     moov_box = next(((o, s) for typ, o, s in top_level_boxes(head) if typ == b"moov"), None)
     if moov_box is None:  # moov after mdat: its offset is right after the last box we can see
         last = top_level_boxes(head)[-1]
@@ -253,14 +255,16 @@ def video_index(cache: Path, camera: str) -> dict:
         size_hdr = http_get(url, (start, start + 7))
         moov_box = (start, struct.unpack(">I", size_hdr[:4])[0])
     off, size = moov_box
-    moov = cached(cache / f"video_{camera}_moov.bin", lambda: http_get(url, (off, off + size - 1))).read_bytes()
+    moov = cached(cache / f"video_{tag}_moov.bin", lambda: http_get(url, (off, off + size - 1))).read_bytes()
     table = parse_moov(moov[8:])
     table["url"] = url
     return table
 
 
-def prepare_clip(cache: Path, camera: str, table: dict, ep: int, t0: float, t1: float, n_frames: int) -> Path:
-    clip = cache / "clips" / f"so101_ep{ep:03d}_{camera}.mp4"
+def prepare_clip(cache: Path, camera: str, table: dict, ep: int, t0: float, t1: float, n_frames: int,
+                 fps: int = FPS, prefix: str = "so101") -> Path:
+    """Cut one episode out of a shared LeRobot video (byte-range download) into an H.264 MP4 at `fps`."""
+    clip = cache / "clips" / f"{prefix}_ep{ep:03d}_{camera}.mp4"
     if clip.exists():
         return clip
     if table["codec"] != "av01":
@@ -268,7 +272,7 @@ def prepare_clip(cache: Path, camera: str, table: dict, ep: int, t0: float, t1: 
     inside, lo, hi = episode_span(table, t0, t1)
     if len(inside) != n_frames:
         raise RuntimeError(f"video has {len(inside)} frames for the episode, metadata says {n_frames}")
-    span = cached(cache / "spans" / f"{camera}_ep{ep:03d}.bin", lambda: http_get(table["url"], (lo, hi - 1))).read_bytes()
+    span = cached(cache / "spans" / (f"{camera}_ep{ep:03d}.bin" if prefix == "so101" else f"{prefix}_{camera}_ep{ep:03d}.bin"), lambda: http_get(table["url"], (lo, hi - 1))).read_bytes()
     frames = []
     for k, s in enumerate(inside):
         a = table["offsets"][s] - lo
@@ -277,10 +281,10 @@ def prepare_clip(cache: Path, camera: str, table: dict, ep: int, t0: float, t1: 
     import imageio_ffmpeg
     clip.parent.mkdir(parents=True, exist_ok=True)
     ivf = clip.with_suffix(".ivf")
-    write_ivf(ivf, frames, table["width"], table["height"], FPS)
+    write_ivf(ivf, frames, table["width"], table["height"], fps)
     tmp = clip.with_name(clip.stem + ".part.mp4")
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-c:v", "libdav1d",
-                    "-i", str(ivf), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-i", str(ivf), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
                     "-movflags", "+faststart", str(tmp)], check=True, timeout=300)
     ivf.unlink(missing_ok=True)
     tmp.replace(clip)

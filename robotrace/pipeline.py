@@ -52,10 +52,23 @@ def process_video(path: Path, meta: VideoMetadata, adapter_name: str, *, model_c
     result = adapter.annotate(path, meta, cache)
     ann_seconds = time.perf_counter() - t1
 
+    trim_note = None
+    if settings.motion_trim and result.is_live_inference and adapter_name in ("muse", "gemini", "claude") \
+            and result.annotations:
+        from .motion_refine import detect_motion_span, trim_idle
+        progress(0.5, "Analysing every frame for robot motion…")
+        span = detect_motion_span(path)
+        done = trim_idle(result.annotations, span, meta.duration_s)
+        trim_note = (f"Full-frame-rate motion analysis ({span.fps:.0f} fps, {span.frames} frames): robot visibly moves "
+                     f"{span.first_motion_s if span.first_motion_s is not None else '?'}–"
+                     f"{span.last_motion_s if span.last_motion_s is not None else '?'} s; trimmed "
+                     f"{done['start_trimmed_s']} s of idle at the start and {done['end_trimmed_s']} s at the end "
+                     "(cut only; development-validated rule).")
+
     progress(0.55, "Extracting evidence frames…")
     n_frames = attach_evidence(result.annotations, path, meta, cache)
 
-    warnings = list(result.warnings)
+    warnings = list(result.warnings) + ([trim_note] if trim_note else [])
     verdicts: dict = {}
     t2 = time.perf_counter()
     if model_check:

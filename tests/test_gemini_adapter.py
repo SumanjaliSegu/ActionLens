@@ -170,7 +170,7 @@ def test_adapter_end_to_end_with_qc(keyed, monkeypatch, tiny_video):
 def test_no_robot_visible_is_reported_not_hidden(keyed, monkeypatch, tiny_video, tmp_path):
     fake_post(monkeypatch, body=api_body(answer(robot_visible=False, actions=[])))
     res = ae.GeminiFrameAdapter(keyed).annotate(tiny_video, probe(tiny_video), tmp_path)
-    assert res.annotations == [] and any("no robot is visible" in w for w in res.warnings)
+    assert res.annotations == [] and any("no robot or manipulating hands are visible" in w for w in res.warnings)
 
 
 def test_schema_violation_fails_instead_of_guessing(keyed, monkeypatch, tiny_video, tmp_path):

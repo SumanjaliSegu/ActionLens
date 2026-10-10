@@ -12,7 +12,6 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from robotrace import __version__
 from robotrace import export_service as ex
 from robotrace import review_service as rs
 from robotrace.annotation_engine import ADAPTERS, MUSE_DATA_NOTICE, AdapterUnavailable, get_adapter
@@ -29,7 +28,7 @@ from robotrace.video_processor import (ALLOWED_EXTENSIONS, VideoError, make_brow
 st.set_page_config(page_title="RoboTrace — robotics annotation QC", page_icon="🎯", layout="wide",
                    initial_sidebar_state="expanded")
 SETTINGS = get_settings()
-PAGES = ["Overview", "Analyze", "Review", "Dashboard", "Export"]
+PAGES = ["Overview", "Benchmark", "Analyze", "Review", "Dashboard", "Export"]
 
 CSS = """
 <style>
@@ -60,6 +59,43 @@ h1, h2, h3 { letter-spacing: -0.01em; }
 .rt-metric .v { font-size:1.6rem; font-weight:700; color:var(--rt-ink); }
 .rt-metric .l { font-size:.8rem; color:var(--rt-muted); }
 div[data-testid="stSidebarNav"] { display:none; }
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"], .stMarkdown, .stButton button { font-family: 'Inter', system-ui, sans-serif; }
+#MainMenu, footer, header [data-testid="stToolbar"], [data-testid="stDecoration"] { visibility: hidden; height: 0; }
+.stApp { background: #f6f8fb; }
+section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0b1220 0%, #111c33 100%); }
+section[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+section[data-testid="stSidebar"] label[data-baseweb="radio"] { padding: .35rem .5rem; border-radius: 8px; }
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover { background: rgba(255,255,255,.06); }
+.rt-brand { font-size: 1.35rem; font-weight: 800; letter-spacing: -.02em; }
+.rt-brand span { background: linear-gradient(90deg,#22d3ee,#a78bfa); -webkit-background-clip:text; color: transparent !important; }
+.rt-hero { background: radial-gradient(1200px 400px at 10% -10%, #1e3a8a 0%, transparent 60%),
+           radial-gradient(900px 400px at 100% 0%, #6d28d9 0%, transparent 55%), #0b1220;
+           border: none; padding: 2.4rem 2.4rem 2rem; border-radius: 20px; box-shadow: 0 20px 50px rgba(15,23,42,.25); }
+.rt-hero h1 { color: #fff; font-size: 3rem; font-weight: 800; letter-spacing: -.03em; margin: .2rem 0 .3rem; }
+.rt-hero p.tag { color: #e0e7ff; font-size: 1.45rem; font-weight: 600; margin: 0 0 .7rem; }
+.rt-hero p { color: #cbd5e1 !important; font-size: 1.02rem; max-width: 820px; }
+.rt-hero .rt-kicker { color: #67e8f9; }
+.rt-metric { border: 1px solid #e2e8f0; border-radius: 14px; padding: 1rem 1.1rem; background: #fff;
+             box-shadow: 0 4px 14px rgba(15,23,42,.05); }
+.rt-metric .v { font-size: 1.9rem; font-weight: 800; color: #0f172a; letter-spacing: -.02em; }
+.rt-metric .l { font-size: .82rem; color: #64748b; }
+.rt-howto { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: .8rem; margin-top: .4rem; }
+.rt-howto div { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:1rem; box-shadow: 0 4px 14px rgba(15,23,42,.04); }
+.rt-howto b { display:block; font-size:1rem; color:#0f172a; margin-bottom:.25rem; }
+.rt-howto i { font-style:normal; display:inline-block; background:linear-gradient(90deg,#06b6d4,#8b5cf6); color:#fff;
+              border-radius:999px; width:1.6rem; height:1.6rem; text-align:center; line-height:1.6rem; font-weight:700; margin-bottom:.4rem; }
+.rt-howto span { color:#64748b; font-size:.88rem; }
+.stButton button[kind="primary"] { background: linear-gradient(90deg,#0891b2,#7c3aed); border: none; font-weight: 600; }
+.stButton button { border-radius: 10px; font-weight: 500; }
+.stButton button[kind="primary"] { color: #fff !important; }
+.stButton button[kind="primary"]:disabled { opacity: .45; color: #fff !important; }
+header[data-testid="stHeader"] { background: transparent; height: 0; }
+.block-container { padding-top: 1.6rem !important; }
+section[data-testid="stSidebar"] .rt-badge { color: #0f172a !important; white-space: normal; }
+section[data-testid="stSidebar"] .rt-mono { font-family: 'Inter', system-ui, sans-serif; font-size: .82rem; }
+div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 14px; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -123,6 +159,8 @@ def mode_badge(sess: ReviewSession) -> str:
         return '<span class="rt-badge rt-sample">PRECOMPUTED SAMPLE</span>'
     if p.adapter == "motion":
         return '<span class="rt-badge rt-low">MOTION SEGMENTATION · NO AI</span>'
+    if p.adapter == "muse-cached":
+        return f'<span class="rt-badge rt-sample">CACHED MUSE OUTPUT · recorded run · {esc(p.model)}</span>'
     if p.is_live_inference:
         who = f"{p.provider} · {p.model}" if p.provider and p.model else p.adapter
         return f'<span class="rt-badge rt-live">LIVE AI · {esc(who)}</span>'
@@ -176,8 +214,8 @@ def load_sample_reference(sha: str) -> dict | None:
 # ------------------------------------------------------------------------------------------ sidebar
 def sidebar() -> None:
     with st.sidebar:
-        st.markdown("### 🎯 RoboTrace")
-        st.caption("Evidence-grounded robotics video annotation & QC")
+        st.markdown('<div class="rt-brand">🎯 <span>RoboTrace</span></div>', unsafe_allow_html=True)
+        st.caption("Robot videos → structured actions")
         st.radio("Navigate", PAGES, key="page", label_visibility="collapsed")
         st.divider()
         sess = review()
@@ -192,69 +230,54 @@ def sidebar() -> None:
         else:
             st.caption("No video loaded yet.")
         st.divider()
-        with st.expander("Engine status", expanded=False):
-            for name in ADAPTERS:
-                ok, why = get_adapter(name).availability()
-                st.markdown(f"{'🟢' if ok else '⚪'} **{name}** — {why}")
-        st.caption(f"v{__version__} · state is per browser session and is not persisted on the server.")
+        st.caption("Physical AI · robot-video annotation & quality control")
 
 
 # ----------------------------------------------------------------------------------------- overview
 def page_overview() -> None:
     st.markdown("""
 <div class="rt-hero">
-  <div class="rt-kicker">Physical AI · robotics data quality</div>
+  <div class="rt-kicker">Physical AI · robot-video annotation & quality control</div>
   <h1>RoboTrace</h1>
-  <p class="tag">Find the annotation errors in robot demonstration videos before they reach your training set.</p>
-  <p style="color:#475569;margin:0">RoboTrace generates or ingests timestamped action annotations, checks every one
-  against the video's own evidence, and hands reviewers a ranked queue of suspicious segments, each with the
-  reason it was flagged.</p>
+  <p class="tag"><b>Turn Robot Videos into Structured Actions</b></p>
+  <p style="color:#475569;margin:0">Upload a robot or human-hand manipulation video and get timestamped actions (reach, grasp,
+  transport, place, release, retract) with the objects involved and the visual evidence for each one. Every
+  segment is checked against the video's own motion signal, and suspicious ones are queued for human review.</p>
 </div>""", unsafe_allow_html=True)
     st.write("")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    c1.button("▶ Try the sample", type="primary", use_container_width=True, on_click=load_sample,
-              help="Synthetic pick-and-place clip with precomputed annotations. No GPU or API key needed.")
-    c2.button("⬆ Upload a video", use_container_width=True, on_click=goto, args=("Analyze",))
+    c1, c2, c3 = st.columns(3)
+    c1.button("⬆ Upload a robot video", type="primary", use_container_width=True, on_click=goto, args=("Analyze",))
+    c2.button("▶ Explore benchmark results", use_container_width=True, on_click=goto, args=("Benchmark",),
+              help="8 real robot clips (UR5 + SO-101) with cached Muse Spark annotations and measured results.")
+    c3.button("▶ Try the sample (synthetic)", use_container_width=True, on_click=load_sample,
+              help="Synthetic clip with precomputed, simulated annotations (for the QC demo).")
+    from robotrace import demo_data
+    summ = demo_data.results_summary()
+    if summ:
+        m1, m2, m3, m4 = st.columns(4)
+        metric(m1, summ["clips"], "development clips (UR5 + SO-101)")
+        metric(m2, f"{summ['per_dataset']['ur5']['five_ordered_steps']}/{summ['per_dataset']['ur5']['clips']}",
+               "UR5 clips with 5 ordered steps")
+        metric(m3, f"{summ['per_dataset']['so101']['missing_or_merged']}/{summ['per_dataset']['so101']['clips']}",
+               "SO-101 clips with a missing/merged step")
+        if summ.get("exp2"):
+            metric(m4, f"{summ['exp2']['idle_before_s']:.1f}s → {summ['exp2']['idle_after_s']:.1f}s",
+                   "idle inside actions (offline trim)")
+        st.caption("Development benchmark (8 clips) and one offline experiment — not a held-out test or an overall "
+                   "accuracy figure. Details on the Benchmark page.")
     show_flash()
 
-    st.markdown("#### How the pipeline works")
+    st.markdown("#### How it works")
     st.markdown("""
-<div class="rt-flow">
-  <div class="rt-step"><b>1 · Ingest</b><span>Validate format, size, duration; decode with OpenCV; hash for caching.</span></div>
-  <div class="rt-arrow">→</div>
-  <div class="rt-step"><b>2 · Annotate</b><span>Swappable adapter: Gemini or Claude vision, remote GPU video-LLM, or motion segmentation.</span></div>
-  <div class="rt-arrow">→</div>
-  <div class="rt-step core"><b>3 · Quality control</b><span>Timestamp rules · pixel-signal evidence · optional model verifier.</span></div>
-  <div class="rt-arrow">→</div>
-  <div class="rt-step"><b>4 · Human review</b><span>Ranked queue, evidence frames, edit / accept / reject, resolve flags.</span></div>
-  <div class="rt-arrow">→</div>
-  <div class="rt-step"><b>5 · Export</b><span>JSON, CSV, QC report, full review package with decision log.</span></div>
+<div class="rt-howto">
+  <div><i>1</i><b>Upload</b><span>Any robot or hand-manipulation video, up to 3 minutes.</span></div>
+  <div><i>2</i><b>AI annotation</b><span>A vision model reads keyframes and returns timestamped actions, objects and visual evidence.</span></div>
+  <div><i>3</i><b>Motion & quality check</b><span>Every frame is analysed for motion; suspicious segments are flagged with a reason.</span></div>
+  <div><i>4</i><b>Review & export</b><span>A reviewer confirms or corrects each action, then exports JSON / CSV for training.</span></div>
 </div>""", unsafe_allow_html=True)
-
-    st.markdown("#### What the quality-control layer checks")
-    a, b, c = st.columns(3)
-    with a, st.container(border=True):
-        st.markdown("**Deterministic rules**")
-        st.caption("Negative, reversed, zero-length, out-of-range, and overlapping intervals; unusually long or "
-                   "short segments; uncovered gaps. Pure arithmetic: always reproducible.")
-    with b, st.container(border=True):
-        st.markdown("**Visual-signal evidence**")
-        st.caption("Frame-difference motion energy and histogram change: actions with no visible motion, "
-                   "idle stretches inside segments, boundaries that cut through ongoing motion, unexplained "
-                   "abrupt changes, and uncovered motion (possible missing actions).")
-    with c, st.container(border=True):
-        st.markdown("**Model judgment (optional)**")
-        st.caption("A vision-language model looks at each segment's start/middle/end frames and says whether "
-                   "they support the description. Shown separately and labelled as an opinion.")
-
-    st.markdown("#### Honest notes")
-    st.markdown("""
-<div class="rt-note">
-• Flags are <b>prompts for a human</b>, not verdicts. "Possible missing action" means unexplained motion, not a confirmed omission.<br>
-• Review priority is a transparent weighted count of flags, <b>not a calibrated probability</b> of error.<br>
-• The bundled sample is a <b>synthetic rendering</b> with a <b>simulated</b> annotator whose errors were injected on purpose, so QC results on it can be checked against known truth. Numbers on the sample say nothing about performance on real robot footage.<br>
-• Live Claude annotation sees sampled still frames, not continuous video, so boundaries are approximate.
-</div>""", unsafe_allow_html=True)
+    st.write("")
+    st.caption("Flags are prompts for a human reviewer, not verdicts. The synthetic sample uses simulated annotations; "
+               "the benchmark clips use cached output of a recorded model run.")
 
 
 # ------------------------------------------------------------------------------------------ analyze
@@ -273,6 +296,103 @@ def save_upload(uploaded) -> Path:
     return dest
 
 
+def load_cached(key: str) -> None:
+    from robotrace import demo_data
+    try:
+        sess, clip = demo_data.load_cached_session(key, SETTINGS)
+    except Exception as e:  # noqa: BLE001 - show the real error, never a fake result
+        flash(f"Could not load cached clip {key}: {type(e).__name__}: {e}", "error")
+        return
+    S()["review"], S()["player_path"] = sess, str(clip)
+    S()["sel"] = sess.annotations[0].id if sess.annotations else None
+    S()["reference"] = None
+    flash(f"Loaded {key}: cached Muse Spark output from the recorded baseline run (no model call). "
+          "Click a segment to seek the video.")
+    goto("Review")
+
+
+def page_benchmark() -> None:
+    from robotrace import demo_data
+    st.markdown("## Benchmark: real robot clips")
+    show_flash()
+    st.markdown('<div class="rt-note"><b>Development benchmark, not a held-out test.</b> 8 clips from public datasets '
+                '(Berkeley UR5, CC-BY-4.0; LeRobot SO-101, Apache-2.0). Annotations below are the <b>cached output of '
+                'one recorded Muse Spark run</b>. Opening a clip replays that result instantly; no model is called.</div>',
+                unsafe_allow_html=True)
+    clips = demo_data.cached_clips()
+    if not clips:
+        st.warning("Cached benchmark files were not found in out/bench_annotation_20261010-213141/. The benchmark "
+                   "demo is unavailable on this machine; upload a video on the Analyze page instead.")
+        return
+    st.markdown("#### Open a clip in the annotation workspace")
+    for row in (clips[:4], clips[4:]):
+        cols = st.columns(4)
+        for col, c in zip(cols, row):
+            with col.container(border=True):
+                st.markdown(f"**{c['dataset'].upper()} · ep {c['episode']}**  \n"
+                            f"<span style='font-size:.85rem;color:#475569'>{esc(c['task'])}</span>",
+                            unsafe_allow_html=True)
+                st.caption(f"{c['n_segments']} cached segments · {c['split']}")
+                st.button("Open", key=f"open_{c['key']}", use_container_width=True, on_click=load_cached,
+                          args=(c["key"],))
+
+    summ = demo_data.results_summary()
+    if not summ:
+        st.info("Benchmark result files not found; results are not shown.")
+        return
+    st.markdown("#### Measured results (development set)")
+    u, s = summ["per_dataset"]["ur5"], summ["per_dataset"]["so101"]
+    m1, m2, m3, m4 = st.columns(4)
+    metric(m1, f"{u['five_ordered_steps']}/{u['clips']}", "UR5 clips: all 5 steps, in order")
+    metric(m2, f"{s['missing_or_merged']}/{s['clips']}", "SO-101 clips: a step missing or merged")
+    e2 = summ.get("exp2")
+    if e2:
+        metric(m3, f"{e2['idle_before_s']:.1f}s → {e2['idle_after_s']:.1f}s", "idle time inside action spans")
+        metric(m4, f"{e2['wrong_cuts_s']:.1f}s", "cuts into main robot motion")
+    detail = "; ".join(f"{k}: no separate {', '.join(v)}" for k, v in s["missing_detail"].items())
+    how = st.expander("How these numbers were measured", expanded=False)
+    how.caption(f"Step completeness = predicted phase sequence equals approach → grasp → transport → release → return "
+               f"(SO-101 {detail}). Baseline cost: {summ['requests']} calls, {summ['tokens_in']:,} input / "
+               f"{summ['tokens_out']:,} output tokens, {summ['latency_s']} s total model time ({esc(summ['model'])}).")
+    if e2:
+        how.caption(f"Idle-time result = offline experiment: video-motion-based trimming of idle time at the "
+                   f"start/end of the cached predictions (no model calls), summed over the 8 clips. It removed "
+                   f"{e2['settling_removed_s']:.1f}s of ambiguous end-settling motion (reported separately, uncertain). "
+                   f"Not yet part of the production pipeline.")
+
+    st.markdown("#### Temporal error and accuracy")
+    rows = []
+    if e2:
+        for ds, lab in (("ur5", "UR5"), ("so101", "SO-101")):
+            a = e2["per_dataset"][ds]
+            rows.append({"metric": f"{lab} — motion-start error (mean)", "baseline": f"{a['start_err_mean'][0]:.2f} s",
+                         "after offline trim (B)": f"{a['start_err_mean'][1]:.2f} s"})
+            rows.append({"metric": f"{lab} — motion-end error vs main motion (mean)",
+                         "baseline": f"{a['end_err_main_mean'][0]:.2f} s",
+                         "after offline trim (B)": f"{a['end_err_main_mean'][1]:.2f} s"})
+    rows += [{"metric": "Action-label accuracy", "baseline": "Not evaluated yet", "after offline trim (B)": "—"},
+             {"metric": "Object identification accuracy", "baseline": "Not evaluated yet", "after offline trim (B)": "—"},
+             {"metric": "Grasp / release boundary error", "baseline": "Not evaluated yet (reference set pending)",
+              "after offline trim (B)": "—"},
+             {"metric": "Held-out generalisation", "baseline": "Not evaluated yet", "after offline trim (B)": "—"}]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption("Errors are measured against motion start/end times checked visually in the video frames (UR5 5 fps, "
+               "±0.2 s; SO-101 30 fps), on the same 8 development clips.")
+
+    with st.expander("Methodology and limitations", expanded=False):
+        st.markdown(
+            "- **Pipeline:** ~1 frame/s sampled from the video → Muse Spark (OpenCode Go) returns actions with first/last "
+            "frame, objects, visual evidence → timestamps = frame times ± half the frame spacing → deterministic QC "
+            "(timestamp rules + video motion signals) → human review → JSON/CSV export.\n"
+            "- **References:** robot gripper/arm signals plus visual frame-by-frame checks; only 7 review rows are "
+            "human-confirmed so far. No overall accuracy percentage is claimed.\n"
+            "- **Known errors:** the model starts *grasp* 1.7–2.7 s early on UR5 (it labels arrival as grasp); "
+            "placement and release are sometimes merged; timing is limited to about ±0.5 s by ~1 fps sampling.\n"
+            "- **Scope:** 8 development clips, 2 robots, 4 tasks, one run per clip (run-to-run variance not measured). "
+            "The offline trimming result is a development experiment and still needs held-out confirmation.\n"
+            "- **Data use:** Muse Spark contributor models may use submitted frames for training.")
+
+
 def page_analyze() -> None:
     st.markdown("## Analyze a video")
     show_flash()
@@ -289,24 +409,28 @@ def page_analyze() -> None:
     st.markdown("#### Annotation engine")
     options = ["muse", "gemini", "claude", "remote", "motion"] +(["sample"] if source != "Upload my video" else [])
     avail = {n: get_adapter(n).availability() for n in options}
+    options = [n for n in options if avail[n][0]] or ["motion"]   # show judges only engines that can run here
     default = next((i for i, n in enumerate(options) if avail[n][0]), len(options) - 1)
     if source != "Upload my video":
         default = options.index("sample")
     engine = st.radio("Engine", options, index=default, horizontal=True,
                       format_func=lambda n: f"{ADAPTERS[n].label}{'' if avail[n][0] else ' — unavailable'}")
     ok, why = avail[engine]
-    (st.caption if ok else st.warning)(why)
+    if not ok:
+        st.warning("This engine is not available right now.")
     if engine in ("muse", "gemini"):
         from robotrace.sampling import describe_sampling, sampling_config
         known = sample_metadata().duration_s if source != "Upload my video" else None
         st.caption("Planned: " + describe_sampling(sampling_config(SETTINGS), known)
-                   + ("" if known else " (exact counts depend on the video's length)") + ".")
+                   + ("" if known else " (exact counts depend on the video's length)")
+                   + (f"; up to {SETTINGS.parallel_requests} requests in parallel" if SETTINGS.parallel_requests > 1 else "")
+                   + ("; plus local motion analysis of every frame at the video's native frame rate to tighten the "
+                      "first/last boundaries" if SETTINGS.motion_trim else "") + ".")
     if engine == "muse" and "contributor" in SETTINGS.muse_model:
         st.info(MUSE_DATA_NOTICE + " Only analyze videos you are allowed to share on those terms.")
     model_check_ok = SETTINGS.has_anthropic_key
-    model_check = st.checkbox("Also run the model-based evidence verifier (Claude vision; one extra API call)",
-                              value=False, disabled=not model_check_ok,
-                              help=None if model_check_ok else "Requires ANTHROPIC_API_KEY.")
+    model_check = (st.checkbox("Also run the model-based evidence verifier (one extra API call)", value=False)
+                   if model_check_ok else False)
 
     run = st.button("Run analysis", type="primary", disabled=not ok or (source == "Upload my video" and uploaded is None))
     if not run:
@@ -348,8 +472,9 @@ def page_analyze() -> None:
     n_open = sum(not f.resolved for f in sess.flags)
     flash(f"Processed {meta.filename}: {len(sess.annotations)} annotations, {n_open} flags.")
     engine_report(sess)
-    for w in sess.processing.warnings:
-        st.warning(esc(w))
+    with st.expander(f"Run notes ({len(sess.processing.warnings)})", expanded=False):
+        for w in sess.processing.warnings:
+            st.warning(esc(w))
     if not sess.annotations:
         st.warning("The engine returned no annotations. You can still add annotations manually in Review.")
     st.button("Open review →", type="primary", on_click=goto, args=("Review",))
@@ -363,8 +488,9 @@ def engine_report(sess: ReviewSession) -> None:
         st.markdown(f"**Provider:** {esc(p.provider)} &nbsp;·&nbsp; **Model:** <span class='rt-mono'>"
                     f"{esc(p.model)}</span>",
                     unsafe_allow_html=True)
-    st.caption(f"{ADAPTERS[p.adapter].label if p.adapter in ADAPTERS else esc(p.adapter)} · {esc(p.adapter_detail)} · "
-               f"annotation took {p.annotation_seconds:.1f}s")
+    with st.expander("Run details", expanded=False):
+        st.caption(f"{ADAPTERS[p.adapter].label if p.adapter in ADAPTERS else esc(p.adapter)} · {esc(p.adapter_detail)} · "
+                   f"annotation took {p.annotation_seconds:.1f}s")
     if p.model_summary:
         st.markdown(f"**Model's scene description:** {esc(p.model_summary)}", unsafe_allow_html=True)
     if any(a.visual_evidence or a.objects for a in sess.baseline):
@@ -396,8 +522,9 @@ def page_review() -> None:
         return
     st.markdown(f"## Review &nbsp; {mode_badge(sess)}", unsafe_allow_html=True)
     v = sess.video
-    st.caption(f"{v.filename} · {v.duration_s:.2f}s · {v.fps:g} fps · {v.width}×{v.height} · "
-               f"engine: {sess.processing.adapter_detail or sess.processing.adapter}")
+    st.caption(f"{v.filename} · {v.duration_s:.1f} s · {v.fps:g} fps · {v.width}×{v.height}")
+    with st.expander("Run details", expanded=False):
+        st.caption(esc(sess.processing.adapter_detail or sess.processing.adapter))
     if sess.processing.is_precomputed_sample:
         st.markdown('<div class="rt-note">These annotations are <b>precomputed and simulated</b> (deliberate errors '
                     'injected for demonstration). They were not produced by live inference.</div>',
@@ -468,8 +595,7 @@ def review_queue(sess: ReviewSession) -> None:
 def annotation_detail(sess: ReviewSession, a) -> None:
     status = sess.status.get(a.id, ReviewStatus.unreviewed)
     st.markdown(f"### {esc(a.action)}", unsafe_allow_html=True)
-    meta_bits = [f"`{a.id}`", f"{a.start:.2f}s → {a.end:.2f}s ({a.end - a.start:.2f}s)", f"source: {a.source}",
-                 f"status: **{status.value}**"]
+    meta_bits = [f"{a.start:.2f}s → {a.end:.2f}s ({a.end - a.start:.2f}s)", f"status: **{status.value}**"]
     if a.confidence is not None:
         meta_bits.append(f"model self-reported confidence {a.confidence:.2f} (uncalibrated)")
     if a.boundary_precision_s is not None:
@@ -820,7 +946,7 @@ def page_export() -> None:
 def main() -> None:
     init_state()
     sidebar()
-    {"Overview": page_overview, "Analyze": page_analyze, "Review": page_review,
+    {"Overview": page_overview, "Benchmark": page_benchmark, "Analyze": page_analyze, "Review": page_review,
      "Dashboard": page_dashboard, "Export": page_export}[S()["page"]]()
 
 

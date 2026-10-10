@@ -68,6 +68,10 @@ class Settings:
     frame_spacing_s: float = field(default_factory=lambda: _float("ROBOTRACE_FRAME_SPACING_S", 0.5))
     window_overlap_s: float = field(default_factory=lambda: _float("ROBOTRACE_WINDOW_OVERLAP_S", 1.0))
     max_windows: int = field(default_factory=lambda: int(_float("ROBOTRACE_MAX_WINDOWS", 4)))
+    # Concurrent model requests for multi-window sampling (1 = sequential, the original behaviour).
+    parallel_requests: int = field(default_factory=lambda: max(1, int(_float("ROBOTRACE_PARALLEL_REQUESTS", 1))))
+    # Trim idle time at the start/end of vision-model annotations using full-frame-rate motion analysis.
+    motion_trim: bool = field(default_factory=lambda: os.environ.get("ROBOTRACE_MOTION_TRIM", "0").strip() == "1")
     # Frames sent per annotation request; bounded to control cost and latency.
     max_frames: int = field(default_factory=lambda: int(_float("ROBOTRACE_MAX_FRAMES", 24)))
 

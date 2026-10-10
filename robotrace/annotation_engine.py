@@ -244,20 +244,27 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{mode
 #           hedge uncertain colours
 #   obs-v3  obs-v2 + states the time range the frames cover; for multi-window sampling also says an action may
 #           be in progress at the first / last frame
-OBSERVATION_PROMPT_VERSION = "obs-v3"
+#   obs-v4  obs-v3 + embodiment-agnostic: a robot arm/gripper OR human hands can be the manipulator (egocentric
+#           human demonstrations returned "no robot visible" and zero actions under obs-v3)
+OBSERVATION_PROMPT_VERSION = "obs-v4"
 
-_GEMINI_PROMPT = """You are annotating a robot manipulation video for a robotics training dataset.
+_GEMINI_PROMPT = """You are annotating a manipulation video for a robotics training dataset. The manipulator may be
+a robot arm / gripper OR human hands (e.g. a first-person human demonstration); annotate whichever is acting.
 You are given {n} still frames sampled at ~{step:.2f}s spacing from {ws:.2f}s to {we:.2f}s of a {dur:.2f}-second
 video. Each frame is preceded by its timestamp in seconds from the start of the video; those timestamps are the
 only valid times.{partial}
-1. In "scene_summary", describe in one or two sentences what is visible (robot / arm / gripper, objects, setting).
-   Set "robot_visible" to false if no robot or robotic manipulator is visible in any frame.
-2. In "actions", list the robot actions you can see, in temporal order and without overlap.
+1. In "scene_summary", describe in one or two sentences what is visible: the manipulator (robot arm / gripper or
+   human hands), the objects, and the setting.
+   Set "robot_visible" to true if a robot manipulator OR human hands manipulating objects are visible, and to false
+   only if neither is visible in any frame.
+2. In "actions", list the manipulation actions you can see, in temporal order and without overlap. If the
+   manipulator is a human, say so in the action text (e.g. "right hand grasps the screwdriver").
    - When the frames show them, split the manipulation into its distinct steps, each as its own action:
-     approach / reach toward the object; grasp (gripper closes on it); lift / transport (object held and
-     moving); place / release (object set down, gripper opens); retract / return (empty gripper moves away).
+     approach / reach toward the object; grasp (gripper or fingers close on it); lift / transport (object held
+     and moving); place / release (object set down, gripper or hand opens); retract / return (empty gripper or
+     hand moves away). Other actions (e.g. screw, insert, align, hold, use a tool) are equally valid.
      Merge steps only when the frames cannot separate them, and never add a step that no frame shows.
-   - If the robot is still in the first frames, the first action starts at the first frame where the arm has
+   - If the manipulator is still in the first frames, the first action starts at the first frame where it has
      visibly moved; do not include the still frames in it.
    - Name a colour only when it is clearly visible; if unsure, say so (e.g. "light green or yellow block").
    For each action give:
@@ -269,7 +276,8 @@ only valid times.{partial}
      object state change). Describe what is visible, not what you assume happened between frames;
    - "evidence_frame_times": timestamps of the frames that show that evidence;
    - "confidence": your confidence in [0, 1].
-Only describe what the frames show. Do not invent actions for periods where the robot is idle or not visible.
+Only describe what the frames show. Do not invent actions for periods where the manipulator is idle or not
+visible.
 If you cannot identify any action, return an empty "actions" list."""
 
 _GEMINI_ACTION_FIELDS = ["first_frame_t", "last_frame_t", "action", "objects", "visual_evidence",
@@ -469,17 +477,32 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
         raise AdapterUnavailable("No frames could be decoded from this video.")
     multi = plan.n_requests > 1
     per_window, infos, summaries, visible, object_sets, windows_used = [], [], [], [], [], []
+    window_details: list[dict] = []
     n_frames = dropped = rejected = 0
     step = plan.spacing_s
+    # 1) decode every window's frames locally; 2) send the model requests (in parallel when configured);
+    # 3) validate and convert in window order. Any failure fails the whole run (no partial results, no retries).
+    prepared = []
     for w in plan.windows:
         frames = extract_frames(path, meta, w.times, cache_dir / "frames")
         if not frames:
             raise AdapterUnavailable("No frames could be decoded from this video.")
         # legacy keeps its original step definition; windowed uses the frames actually decoded in the window
-        step = meta.duration_s / len(w.times) if plan.mode == "legacy" else (w.end - w.start) / len(frames)
-        prompt = _GEMINI_PROMPT.format(n=len(frames), dur=meta.duration_s, step=step, ws=w.start, we=w.end,
+        wstep = meta.duration_s / len(w.times) if plan.mode == "legacy" else (w.end - w.start) / len(frames)
+        prompt = _GEMINI_PROMPT.format(n=len(frames), dur=meta.duration_s, step=wstep, ws=w.start, we=w.end,
                                        partial=_PARTIAL_WINDOW_NOTE if multi else "")
-        data, info = call(prompt, frames)
+        prepared.append((w, frames, wstep, prompt))
+    workers = max(1, min(int(getattr(settings, "parallel_requests", 1)), len(prepared)))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(call, prompt, frames) for _, frames, _, prompt in prepared]
+            responses = []
+            for fut in futures:  # in window order; the first failure (by window) is reported
+                responses.append(fut.result())
+    else:
+        responses = [call(prompt, frames) for _, frames, _, prompt in prepared]
+    for (w, frames, step, _), (data, info) in zip(prepared, responses):
         try:
             parsed = _GeminiOutput.model_validate(data)
         except ValidationError as e:
@@ -497,6 +520,10 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
         visible.append(parsed.robot_visible)
         object_sets.append(sorted({o.lower() for a_ in anns for o in a_.objects}))
         windows_used.append([w.start, w.end, len(frames)])
+        window_details.append({"window_s": [w.start, w.end], "frames": len(frames),
+                               "manipulator_visible": parsed.robot_visible, "actions_returned": len(parsed.actions),
+                               "actions_rejected": rej, "scene_summary": parsed.scene_summary.strip()[:300],
+                               "response_id": info.get("response_id")})
         n_frames += len(frames)
         dropped += d
         rejected += rej
@@ -513,9 +540,10 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
         warnings.append(f"The video is too long for {cfg['spacing_s']:.2f}s spacing within {cfg['max_windows']} "
                         f"requests; spacing was widened to ~{plan.spacing_s:.2f}s.")
     if not any(visible):
-        warnings.append(f"{provider} ({model}) reported that no robot is visible in the sampled frames.")
+        warnings.append(f"{provider} ({model}) reported that no robot or manipulating hands are visible in the "
+                        "sampled frames.")
     elif not all(visible):
-        warnings.append(f"Windows disagree on whether a robot is visible ({sum(visible)}/{len(visible)} say yes).")
+        warnings.append(f"Windows disagree on whether a manipulator is visible ({sum(visible)}/{len(visible)} say yes).")
     if multi and len({tuple(s) for s in object_sets if s}) > 1:
         warnings.append("Object names differ between windows: " + "; ".join(", ".join(s) for s in object_sets if s)
                         + ". Check that they refer to the same objects.")
@@ -536,7 +564,7 @@ def _annotate_frame_windows(settings: Settings, path: Path, meta: VideoMetadata,
     summary = " | ".join(dict.fromkeys(x for x in summaries if x))[:600]
     sampling = {"config": cfg, "mode": plan.mode, "spacing_s": round(plan.spacing_s, 3), "requests": plan.n_requests,
                 "frames": n_frames, "windows": windows_used, "capped": plan.capped, "merged_at_seams": n_merged,
-                "rejected_actions": rejected}
+                "rejected_actions": rejected, "window_details": window_details}
     return AnnotationResult(annotations=anns, adapter=adapter, is_live_inference=True, adapter_detail=detail,
                             warnings=warnings, model_summary=summary, provider=provider, model=model,
                             prompt_version=OBSERVATION_PROMPT_VERSION, sampling=sampling)
